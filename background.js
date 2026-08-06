@@ -1,0 +1,402 @@
+/*
+ * [INPUT]: 依赖 ctx.sqlite 保存转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务
+ * [OUTPUT]: 注册环境检查、模型安装、转写、声音角色创建、配音合成、历史与用户确认入库 operation
+ * [POS]: audio-studio 的唯一业务后端；输出先停留在 App 文件沙箱，绝不在生成时自动创建素材库 Asset
+ * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
+ */
+
+const WHISPER_MODELS = ["whisper-small", "whisper-medium", "whisper-large-v3"];
+const KINDS = new Set(["audio", "video"]);
+const LANGUAGES = new Set(["auto", "zh", "en"]);
+const STYLES = new Set(["neutral", "calm", "excited", "gentle"]);
+const ACTIONS = new Set(["prepare", "install", "transcribe", "character", "synthesize"]);
+const ACTIVE_JOB_STATUSES = new Set(["queued", "running"]);
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
+const RECORD_TABLES = {
+  transcribe: "audio_transcripts",
+  character: "audio_characters",
+  synthesize: "audio_syntheses",
+};
+
+function value(input, name) { return String(input[name] || "").trim(); }
+function outputID() { return `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+
+function ensureSchema(ctx) {
+  ctx.sqlite.execute("create table if not exists audio_transcripts (id text primary key, source_asset_id text not null, source_kind text not null, model text not null, language text not null, srt_path text not null, json_path text not null, duration real not null default 0, created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
+  ctx.sqlite.execute("create table if not exists audio_characters (id text primary key, name text not null, model text not null, sample_path text not null, sample_asset_id text not null default '', prompt_text text not null default '', created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
+  ctx.sqlite.execute("create table if not exists audio_syntheses (id text primary key, character_id text not null, text text not null, style text not null default 'neutral', output_path text not null, mime_type text not null, saved_asset_id text not null default '', created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
+  ctx.sqlite.execute("create table if not exists audio_jobs (job_id text primary key, action text not null, record_id text not null default '', started_at text not null, resolved_at text not null default '')");
+}
+
+function parseProcess(result) {
+  const lines = String(result.stdout || "").trim().split("\n").filter(Boolean);
+  const last = lines[lines.length - 1] || "{}";
+  let payload;
+  try { payload = JSON.parse(last); } catch (_) { payload = { ready: false, error: String(result.stdout || result.error || "Python did not return a status payload.") }; }
+  if (Number(result.exitCode) !== 0) payload.error = payload.error || String(result.stdout || result.error || "Python process failed.");
+  return payload;
+}
+
+function run(ctx, args, timeoutSeconds) {
+  return parseProcess(ctx.shell.exec({ command: "python3", args: ["python/audio_runner.py", ...args], environment: "audio-studio", timeoutSeconds }));
+}
+
+function shellJobID(job) { return String(job.id || job.ID || "").trim(); }
+function shellJobStatus(job) { return String(job.status || job.Status || "").trim(); }
+function shellJobError(job) { return String(job.error || job.Error || "").trim(); }
+function isActiveJob(status) { return ACTIVE_JOB_STATUSES.has(status); }
+function isTerminalJob(status) { return TERMINAL_JOB_STATUSES.has(status); }
+function outputStatus(status) { return status === "completed" ? "completed" : "failed"; }
+
+function settleOutput(ctx, action, recordID, job) {
+  if (!recordID || !isTerminalJob(job.status)) return;
+  const table = RECORD_TABLES[action];
+  if (!table) return;
+  ctx.sqlite.execute(`update ${table} set status = ?, error = ? where id = ?`, [outputStatus(job.status), job.error || job.status, recordID]);
+}
+
+function resolveTrackedJob(ctx, record, job) {
+  settleOutput(ctx, record.action, record.record_id, job);
+  return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: job.status, error: job.error || "", logs: ctx.shell.logs(record.job_id).slice(-80) };
+}
+
+function trackedJob(ctx) {
+  ensureSchema(ctx);
+  const rows = ctx.sqlite.query("select job_id, action, record_id, started_at from audio_jobs where resolved_at = '' order by started_at desc limit 1");
+  if (!rows.length) return null;
+  const record = rows[0];
+  if (!record.job_id || !ACTIONS.has(record.action)) {
+    ctx.sqlite.execute("update audio_jobs set resolved_at = ? where job_id = ?", [new Date().toISOString(), record.job_id]);
+    return null;
+  }
+  let job;
+  try { job = ctx.shell.status(record.job_id); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : "shell job is unavailable";
+    const interrupted = { status: "interrupted", error: `任务记录不可恢复：${message}` };
+    settleOutput(ctx, record.action, record.record_id, interrupted);
+    return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
+  }
+  const status = shellJobStatus(job);
+  if (!isActiveJob(status) && !isTerminalJob(status)) {
+    const interrupted = { status: "interrupted", error: `任务状态不可识别：${status || "empty"}` };
+    settleOutput(ctx, record.action, record.record_id, interrupted);
+    return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
+  }
+  return resolveTrackedJob(ctx, record, { status, error: shellJobError(job) });
+}
+
+function ensureNoActiveJob(ctx) {
+  ensureSchema(ctx);
+  const existing = trackedJob(ctx);
+  if (existing && isActiveJob(existing.status)) throw new Error("声音工坊已有任务正在执行，请等待完成或先取消。");
+  if (existing) ctx.sqlite.execute("update audio_jobs set resolved_at = ? where job_id = ?", [new Date().toISOString(), existing.id]);
+}
+
+function trackJob(ctx, job, action, recordID = "") {
+  ensureSchema(ctx);
+  const id = shellJobID(job);
+  if (!id || !ACTIONS.has(action)) throw new Error("Audio task did not return a valid shell job id.");
+  const now = new Date().toISOString();
+  ctx.sqlite.execute("update audio_jobs set resolved_at = ? where resolved_at = ''", [now]);
+  ctx.sqlite.execute("insert into audio_jobs (job_id, action, record_id, started_at, resolved_at) values (?, ?, ?, ?, '')", [id, action, recordID, now]);
+  return job;
+}
+
+function markFailed(ctx, action, recordID, error) {
+  const table = RECORD_TABLES[action];
+  if (!table || !recordID) return;
+  ctx.sqlite.execute(`update ${table} set status = 'failed', error = ? where id = ?`, [error instanceof Error ? error.message : String(error), recordID]);
+}
+
+function status(_, ctx) {
+  const activeJob = trackedJob(ctx);
+  const environment = ctx.python.status();
+  if (!environment.ready) return { ready: false, pending: true, modelsRoot: "~/.recut/models/audio-studio", error: environment.error || "Python 运行环境尚未就绪。", asr: { installed: [] }, tts: { ready: false }, activeJob };
+  const runner = run(ctx, ["status"], 20);
+  const result = { ...runner, activeJob };
+  if (activeJob && isTerminalJob(activeJob.status) && activeJob.status !== "completed" && (activeJob.action === "prepare" || activeJob.action === "install")) {
+    const logs = (activeJob.logs || []).slice(-30);
+    const lastLine = [...logs].reverse().map((entry) => entry.text.trim()).find(Boolean);
+    result.ready = false;
+    result.setupError = lastLine || activeJob.error || "未知错误";
+    result.error = `运行环境准备失败：${result.setupError}`;
+    result.setupLogs = logs;
+  } else if (!runner.ready) {
+    result.setupError = runner.error || "运行环境检查未通过。";
+    result.setupLogs = [];
+  }
+  return result;
+}
+
+function prepare(_, ctx) {
+  ensureNoActiveJob(ctx);
+  return { job: trackJob(ctx, ctx.python.prepare(), "prepare") };
+}
+
+function install(input, ctx) {
+  const selected = value(input, "model");
+  if (!WHISPER_MODELS.includes(selected) && selected !== "cosyvoice2") throw new Error("model must be a whisper model or cosyvoice2");
+  ensureNoActiveJob(ctx);
+  return { job: trackJob(ctx, ctx.python.run(["python/audio_runner.py", "install", "--model", selected]), "install") };
+}
+
+function transcribe(input, ctx) {
+  ensureSchema(ctx);
+  const assetID = value(input, "assetId");
+  const kind = value(input, "kind");
+  const model = value(input, "model");
+  const language = value(input, "language");
+  if (!assetID || !KINDS.has(kind) || !WHISPER_MODELS.includes(model) || !LANGUAGES.has(language)) throw new Error("assetId, kind, model and language are required");
+  ensureNoActiveJob(ctx);
+  const source = ctx.media.materialize(assetID);
+  if (source.kind !== kind) throw new Error(`Selected Asset is ${source.kind}, not ${kind}.`);
+  const id = outputID();
+  const stem = `transcripts/${id}`;
+  const record = { id, sourceAssetId: assetID, sourceKind: kind, model, language, srtPath: `${stem}.srt`, jsonPath: `${stem}.json`, duration: 0, createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
+  ctx.sqlite.execute("insert into audio_transcripts (id, source_asset_id, source_kind, model, language, srt_path, json_path, duration, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.sourceAssetId, record.sourceKind, record.model, record.language, record.srtPath, record.jsonPath, record.duration, record.createdAt, record.jobId, record.status, record.error]);
+  try {
+    const job = ctx.python.run(["python/audio_runner.py", "transcribe", "--model", model, "--language", language, "--input", source.path, "--output", stem]);
+    const tracked = trackJob(ctx, job, "transcribe", id);
+    record.jobId = shellJobID(tracked);
+    ctx.sqlite.execute("update audio_transcripts set job_id = ? where id = ?", [record.jobId, id]);
+    return { job: tracked, transcript: { id } };
+  } catch (error) {
+    markFailed(ctx, "transcribe", id, error);
+    throw error;
+  }
+}
+
+function readJSON(ctx, path) {
+  try { return JSON.parse(ctx.files.readText(path)); }
+  catch (_) { return null; }
+}
+
+function transcriptRecord(ctx, row) {
+  const record = { id: row.id, sourceAssetId: row.source_asset_id, sourceKind: row.source_kind, model: row.model, language: row.language, duration: row.duration, createdAt: row.created_at, srtURL: "", jsonURL: "" };
+  try {
+    record.srtURL = ctx.files.url(row.srt_path);
+    record.jsonURL = ctx.files.url(row.json_path);
+  } catch (error) {
+    ctx.sqlite.execute("update audio_transcripts set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : "转写文件已丢失。", row.id]);
+    return null;
+  }
+  return record;
+}
+
+function transcripts(_, ctx) {
+  ensureSchema(ctx);
+  trackedJob(ctx);
+  return ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, duration, created_at from audio_transcripts where status = 'completed' order by created_at desc").map((row) => transcriptRecord(ctx, row)).filter(Boolean);
+}
+
+function transcript(input, ctx) {
+  ensureSchema(ctx);
+  trackedJob(ctx);
+  const id = value(input, "id");
+  const rows = ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, duration, created_at, srt_path, json_path, status, error from audio_transcripts where id = ?", [id]);
+  if (!rows.length) throw new Error("Audio transcript was not found.");
+  const row = rows[0];
+  if (row.status !== "completed") return { id: row.id, status: row.status, error: row.error || "" };
+  const record = transcriptRecord(ctx, row);
+  if (!record) throw new Error("Audio transcript files are missing.");
+  const data = readJSON(ctx, row.json_path) || { segments: [] };
+  return { ...record, segments: data.segments || [], srt: ctx.files.readText(row.srt_path) };
+}
+
+function characterCreate(input, ctx) {
+  ensureSchema(ctx);
+  const assetID = value(input, "assetId");
+  const name = value(input, "name");
+  const model = value(input, "model");
+  if (!assetID || !name || !WHISPER_MODELS.includes(model)) throw new Error("assetId, name and model are required");
+  ensureNoActiveJob(ctx);
+  const source = ctx.media.materialize(assetID);
+  if (source.kind !== "audio") throw new Error(`Selected Asset is ${source.kind}, not audio.`);
+  const id = outputID();
+  const stem = `characters/${id}/sample`;
+  const record = { id, name, model, samplePath: `${stem}.wav`, sampleAssetId: "", promptText: "", createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
+  ctx.sqlite.execute("insert into audio_characters (id, name, model, sample_path, sample_asset_id, prompt_text, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.name, record.model, record.samplePath, record.sampleAssetId, record.promptText, record.createdAt, record.jobId, record.status, record.error]);
+  try {
+    const job = ctx.python.run(["python/audio_runner.py", "character", "--model", model, "--input", source.path, "--output", stem]);
+    const tracked = trackJob(ctx, job, "character", id);
+    record.jobId = shellJobID(tracked);
+    ctx.sqlite.execute("update audio_characters set job_id = ? where id = ?", [record.jobId, id]);
+    return { job: tracked, character: { id } };
+  } catch (error) {
+    markFailed(ctx, "character", id, error);
+    throw error;
+  }
+}
+
+function characterRecord(ctx, row) {
+  const record = { id: row.id, name: row.name, model: row.model, promptText: row.prompt_text, sampleAssetId: row.sample_asset_id, createdAt: row.created_at, sampleURL: "" };
+  try { record.sampleURL = ctx.files.url(row.sample_path); }
+  catch (error) {
+    ctx.sqlite.execute("update audio_characters set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : "角色参考音已丢失。", row.id]);
+    return null;
+  }
+  return record;
+}
+
+function characterComplete(input, ctx) {
+  ensureSchema(ctx);
+  trackedJob(ctx);
+  const id = value(input, "id");
+  const rows = ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, created_at, status, error from audio_characters where id = ?", [id]);
+  if (!rows.length) throw new Error("Audio character was not found.");
+  const row = rows[0];
+  if (row.status === "queued" || row.status === "") return { id: row.id, status: "queued" };
+  const meta = readJSON(ctx, `${row.sample_path}.meta.json`);
+  if (row.status === "completed" && meta && meta.promptText) {
+    ctx.sqlite.execute("update audio_characters set prompt_text = ? where id = ?", [meta.promptText, id]);
+    row.prompt_text = meta.promptText;
+  }
+  const record = characterRecord(ctx, row);
+  if (!record) throw new Error("Audio character sample is missing.");
+  return { ...record, status: row.status, error: row.error || "" };
+}
+
+function characters(_, ctx) {
+  ensureSchema(ctx);
+  trackedJob(ctx);
+  return ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, created_at from audio_characters where status = 'completed' order by created_at desc").map((row) => characterRecord(ctx, row)).filter(Boolean);
+}
+
+function characterRemove(input, ctx) {
+  ensureSchema(ctx);
+  const id = value(input, "id");
+  const rows = ctx.sqlite.query("select id from audio_characters where id = ?", [id]);
+  if (!rows.length) throw new Error("Audio character was not found.");
+  ctx.sqlite.execute("delete from audio_characters where id = ?", [id]);
+  ctx.sqlite.execute("update audio_syntheses set status = 'failed', error = '声音角色已删除。' where character_id = ? and status = 'queued'", [id]);
+  return { id, removed: true };
+}
+
+function synthesize(input, ctx) {
+  ensureSchema(ctx);
+  const characterID = value(input, "characterId");
+  const text = value(input, "text");
+  const style = value(input, "style") || "neutral";
+  if (!characterID || !text) throw new Error("characterId and text are required");
+  if (!STYLES.has(style)) throw new Error("style must be neutral, calm, excited, or gentle");
+  ensureNoActiveJob(ctx);
+  const characters = ctx.sqlite.query("select id, sample_path, prompt_text from audio_characters where id = ? and status = 'completed'", [characterID]);
+  if (!characters.length) throw new Error("Selected voice character was not found.");
+  const character = characters[0];
+  if (!character.prompt_text) throw new Error("Voice character has no prompt text; recreate it with an installed Whisper model.");
+  const id = outputID();
+  const outputPath = `syntheses/${id}.wav`;
+  const record = { id, characterId: characterID, text, style, outputPath, mimeType: "audio/wav", savedAssetId: "", createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
+  ctx.sqlite.execute("insert into audio_syntheses (id, character_id, text, style, output_path, mime_type, saved_asset_id, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.characterId, record.text, record.style, record.outputPath, record.mimeType, record.savedAssetId, record.createdAt, record.jobId, record.status, record.error]);
+  try {
+    const job = ctx.python.run(["python/audio_runner.py", "synthesize", "--text", text, "--reference", character.sample_path, "--prompt-text", character.prompt_text, "--style", style, "--output", outputPath]);
+    const tracked = trackJob(ctx, job, "synthesize", id);
+    record.jobId = shellJobID(tracked);
+    ctx.sqlite.execute("update audio_syntheses set job_id = ? where id = ?", [record.jobId, id]);
+    return { job: tracked, synthesis: { id } };
+  } catch (error) {
+    markFailed(ctx, "synthesize", id, error);
+    throw error;
+  }
+}
+
+function synthesisRecord(ctx, row) {
+  const record = { id: row.id, characterId: row.character_id, text: row.text, style: row.style, savedAssetId: row.saved_asset_id, createdAt: row.created_at, outputURL: "", duration: 0 };
+  try { record.outputURL = ctx.files.url(row.output_path); }
+  catch (error) {
+    ctx.sqlite.execute("update audio_syntheses set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : "合成音频已丢失。", row.id]);
+    return null;
+  }
+  const meta = readJSON(ctx, `${row.output_path}.meta.json`);
+  if (meta && meta.duration) record.duration = meta.duration;
+  return record;
+}
+
+function synthesisComplete(input, ctx) {
+  ensureSchema(ctx);
+  trackedJob(ctx);
+  const id = value(input, "id");
+  const rows = ctx.sqlite.query("select id, character_id, text, style, output_path, saved_asset_id, created_at, status, error from audio_syntheses where id = ?", [id]);
+  if (!rows.length) throw new Error("Audio synthesis was not found.");
+  const row = rows[0];
+  if (row.status === "queued" || row.status === "") return { id: row.id, status: "queued" };
+  const record = synthesisRecord(ctx, row);
+  if (!record) throw new Error("Audio synthesis output is missing.");
+  return { ...record, status: row.status, error: row.error || "" };
+}
+
+function syntheses(_, ctx) {
+  ensureSchema(ctx);
+  trackedJob(ctx);
+  return ctx.sqlite.query("select id, character_id, text, style, output_path, saved_asset_id, created_at from audio_syntheses where status = 'completed' order by created_at desc").map((row) => synthesisRecord(ctx, row)).filter(Boolean);
+}
+
+function save(input, ctx) {
+  ensureSchema(ctx);
+  const id = value(input, "id");
+  const kind = value(input, "kind");
+  if (kind === "synthesis") {
+    const rows = ctx.sqlite.query("select id, output_path, mime_type, saved_asset_id from audio_syntheses where id = ? and status = 'completed'", [id]);
+    if (!rows.length) throw new Error("Audio synthesis was not found.");
+    const record = rows[0];
+    if (!record.saved_asset_id) {
+      const asset = ctx.media.importFile({ path: record.output_path, name: `voice-${record.id}.wav`, mimeType: record.mime_type });
+      ctx.sqlite.execute("update audio_syntheses set saved_asset_id = ? where id = ?", [asset.id, id]);
+      record.saved_asset_id = asset.id;
+    }
+    return { id, kind, assetId: record.saved_asset_id };
+  }
+  if (kind === "character") {
+    const rows = ctx.sqlite.query("select id, sample_path, sample_asset_id from audio_characters where id = ? and status = 'completed'", [id]);
+    if (!rows.length) throw new Error("Audio character was not found.");
+    const record = rows[0];
+    if (!record.sample_asset_id) {
+      const asset = ctx.media.importFile({ path: record.sample_path, name: `voice-character-${record.id}.wav`, mimeType: "audio/wav" });
+      ctx.sqlite.execute("update audio_characters set sample_asset_id = ? where id = ?", [asset.id, id]);
+      record.sample_asset_id = asset.id;
+    }
+    return { id, kind, assetId: record.sample_asset_id };
+  }
+  throw new Error("kind must be synthesis or character");
+}
+
+function job(_, ctx) {
+  return trackedJob(ctx);
+}
+
+function resolveJob(input, ctx) {
+  ensureSchema(ctx);
+  const id = value(input, "id");
+  const active = trackedJob(ctx);
+  if (!active || active.id !== id) return { id, resolved: false };
+  if (isActiveJob(active.status)) throw new Error("Audio task is still running.");
+  ctx.sqlite.execute("update audio_jobs set resolved_at = ? where job_id = ?", [new Date().toISOString(), id]);
+  return { id, resolved: true };
+}
+
+function cancel(_, ctx) {
+  const active = trackedJob(ctx);
+  if (!active || !isActiveJob(active.status)) return { cancelled: false };
+  ctx.shell.cancel(active.id);
+  return { cancelled: true, id: active.id };
+}
+
+recut.operation.register("audio.status", status);
+recut.operation.register("audio.prepare", prepare);
+recut.operation.register("audio.install", install);
+recut.operation.register("audio.transcribe", transcribe);
+recut.operation.register("audio.transcripts", transcripts);
+recut.operation.register("audio.transcript", transcript);
+recut.operation.register("audio.character.create", characterCreate);
+recut.operation.register("audio.character.complete", characterComplete);
+recut.operation.register("audio.characters", characters);
+recut.operation.register("audio.character.remove", characterRemove);
+recut.operation.register("audio.synthesize", synthesize);
+recut.operation.register("audio.synthesis.complete", synthesisComplete);
+recut.operation.register("audio.syntheses", syntheses);
+recut.operation.register("audio.save", save);
+recut.operation.register("audio.job", job);
+recut.operation.register("audio.resolve", resolveJob);
+recut.operation.register("audio.cancel", cancel);

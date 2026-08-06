@@ -1,0 +1,125 @@
+{
+  "manifestVersion": 1,
+  "id": "recut.audio-studio",
+  "name": "声音工坊",
+  "author": "Recut",
+  "description": "本地转写、声音角色与配音：把音视频转成字幕和可编辑文稿，用一段参考音创建声音角色，再让角色朗读新文本。",
+  "repository": "https://github.com/6174/recut-audio-studio",
+  "version": "0.1.0",
+  "type": "standalone",
+  "background": "background.js",
+  "ui": { "standaloneView": "ui/dist/index.html" },
+  "permissions": ["sqlite", "files", "media.read", "media.write", "python", "shell"],
+  "runtime": {
+    "python": {
+      "venv": "audio-studio",
+      "version": "3.11",
+      "requirements": "python/requirements.lock",
+      "bootstrap": "bootstrap.sh"
+    }
+  },
+  "operations": [
+    {
+      "name": "audio.status",
+      "surfaces": ["api", "mcp"],
+      "description": "检查声音工坊的本地 Python、FFmpeg、Whisper 模型与 CosyVoice 运行环境和已下载模型。",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "audio.prepare",
+      "surfaces": ["api"],
+      "description": "自动安装声音工坊的 Python 运行依赖和 CosyVoice 官方代码，不下载模型权重。",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "audio.install",
+      "surfaces": ["api", "mcp"],
+      "description": "安装声音工坊运行依赖，并下载用户选择的 Whisper 模型或 CosyVoice2 权重到 .recut/models/audio-studio。",
+      "inputSchema": { "type": "object", "required": ["model"], "properties": { "model": { "type": "string", "enum": ["whisper-small", "whisper-medium", "whisper-large-v3", "cosyvoice2"] } } }
+    },
+    {
+      "name": "audio.transcribe",
+      "surfaces": ["api", "mcp"],
+      "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，不会保存到素材库。",
+      "inputSchema": { "type": "object", "required": ["assetId", "kind", "model", "language"], "properties": { "assetId": { "type": "string" }, "kind": { "type": "string", "enum": ["audio", "video"] }, "model": { "type": "string", "enum": ["whisper-small", "whisper-medium", "whisper-large-v3"] }, "language": { "type": "string", "enum": ["auto", "zh", "en"] } } }
+    },
+    {
+      "name": "audio.transcripts",
+      "surfaces": ["api", "mcp"],
+      "description": "读取尚未导入或已导出的声音工坊转写记录。",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "audio.transcript",
+      "surfaces": ["api"],
+      "description": "读取一条已完成的转写记录，返回文稿分段和 SRT 正文。",
+      "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
+    },
+    {
+      "name": "audio.character.create",
+      "surfaces": ["api", "mcp"],
+      "description": "从一段参考音频素材创建声音角色：抽取 16k 参考音并转写为角色提示词，返回异步任务。",
+      "inputSchema": { "type": "object", "required": ["assetId", "name", "model"], "properties": { "assetId": { "type": "string" }, "name": { "type": "string" }, "model": { "type": "string", "enum": ["whisper-small", "whisper-medium", "whisper-large-v3"] } } }
+    },
+    {
+      "name": "audio.character.complete",
+      "surfaces": ["api"],
+      "description": "在角色任务完成后读取参考音和提示词，返回可播放的声音角色。",
+      "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
+    },
+    {
+      "name": "audio.characters",
+      "surfaces": ["api", "mcp"],
+      "description": "读取已创建的声音角色列表。",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "audio.character.remove",
+      "surfaces": ["api", "mcp"],
+      "description": "删除一个声音角色记录；其私有参考音文件保留在 App 文件区。",
+      "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
+    },
+    {
+      "name": "audio.synthesize",
+      "surfaces": ["api", "mcp"],
+      "description": "用一段文本、一个声音角色和可选情绪风格合成配音，返回异步任务。",
+      "inputSchema": { "type": "object", "required": ["characterId", "text"], "properties": { "characterId": { "type": "string" }, "text": { "type": "string" }, "style": { "type": "string", "enum": ["neutral", "calm", "excited", "gentle"] } } }
+    },
+    {
+      "name": "audio.synthesis.complete",
+      "surfaces": ["api"],
+      "description": "在合成任务完成后读取配音输出，返回可播放的私有音频 URL。",
+      "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
+    },
+    {
+      "name": "audio.syntheses",
+      "surfaces": ["api", "mcp"],
+      "description": "读取已完成的合成配音记录。",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "audio.save",
+      "surfaces": ["api", "mcp"],
+      "description": "将用户明确选择的私有配音或声音角色参考音导入素材库。",
+      "inputSchema": { "type": "object", "required": ["id", "kind"], "properties": { "id": { "type": "string" }, "kind": { "type": "string", "enum": ["synthesis", "character"] } } }
+    },
+    {
+      "name": "audio.job",
+      "surfaces": ["api"],
+      "description": "读取最近尚未由界面确认的声音工坊本地任务，包括持久化状态和启动日志。",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "audio.resolve",
+      "surfaces": ["api"],
+      "description": "在界面已处理终态后确认声音工坊本地任务，避免重连后显示过期执行状态。",
+      "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
+    },
+    {
+      "name": "audio.cancel",
+      "surfaces": ["api"],
+      "description": "停止当前正在运行的声音工坊本地任务，并保留终态日志。",
+      "inputSchema": { "type": "object", "properties": {} }
+    }
+  ]
+}

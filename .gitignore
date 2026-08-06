@@ -1,0 +1,7 @@
+.DS_Store
+node_modules/
+.recut/
+__pycache__/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

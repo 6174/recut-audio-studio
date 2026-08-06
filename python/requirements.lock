@@ -1,0 +1,33 @@
+# Platform-owned virtual environment requirements for 声音工坊.
+# ASR via faster-whisper; TTS via CosyVoice2 whose flow/hifigan use the matcha
+# modules vendored as the CosyVoice third_party/Matcha-TTS git submodule (cloned
+# by bootstrap.sh, never pip-installed). openai-whisper and modelscope are
+# intentionally absent: the runner injects a whisper shim (log_mel_spectrogram +
+# whisper.tokenizer.Tokenizer over vendored mel filters) and a modelscope shim
+# (snapshot_download), so nothing builds from source at install time.
+torch==2.3.1
+torchaudio==2.3.1
+torchvision==0.18.1
+numpy==1.26.4
+faster-whisper
+huggingface-hub
+onnxruntime==1.18.0
+onnx==1.16.0
+transformers==4.51.3
+x-transformers==2.11.24
+conformer==0.3.2
+diffusers==0.29.0
+hydra-core==1.3.2
+omegaconf==2.3.0
+librosa==0.10.2
+soundfile==0.12.1
+protobuf==4.25
+rich==13.7.1
+inflect==7.3.1
+hyperpyyaml==1.2.3
+gdown==5.1.0
+tqdm
+tiktoken
+einops
+regex
+scipy
