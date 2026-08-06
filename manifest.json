@@ -22,7 +22,7 @@
     {
       "name": "audio.status",
       "surfaces": ["api", "mcp"],
-      "description": "检查声音工坊的本地 Python、FFmpeg、Whisper 模型与 CosyVoice 运行环境和已下载模型。",
+      "description": "检查声音工坊的本地 Python、FFmpeg、Whisper/Qwen3-ASR 模型与 CosyVoice 运行环境和已下载模型。",
       "inputSchema": { "type": "object", "properties": {} }
     },
     {
@@ -34,14 +34,14 @@
     {
       "name": "audio.install",
       "surfaces": ["api", "mcp"],
-      "description": "安装声音工坊运行依赖，并下载用户选择的 Whisper 模型或 CosyVoice2 权重到 .recut/models/audio-studio。",
-      "inputSchema": { "type": "object", "required": ["model"], "properties": { "model": { "type": "string", "enum": ["whisper-small", "whisper-medium", "whisper-large-v3", "cosyvoice2"] } } }
+      "description": "安装声音工坊运行依赖，并从 Hugging Face、ModelScope 或自动回退来源下载用户选择的 Whisper、Qwen3-ASR 或 CosyVoice2 权重到 .recut/models/audio-studio。",
+      "inputSchema": { "type": "object", "required": ["model"], "properties": { "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3", "cosyvoice2"] }, "source": { "type": "string", "enum": ["automatic", "huggingface", "modelscope"] } } }
     },
     {
       "name": "audio.transcribe",
       "surfaces": ["api", "mcp"],
       "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，不会保存到素材库。",
-      "inputSchema": { "type": "object", "required": ["assetId", "kind", "model", "language"], "properties": { "assetId": { "type": "string" }, "kind": { "type": "string", "enum": ["audio", "video"] }, "model": { "type": "string", "enum": ["whisper-small", "whisper-medium", "whisper-large-v3"] }, "language": { "type": "string", "enum": ["auto", "zh", "en"] } } }
+      "inputSchema": { "type": "object", "required": ["assetId", "kind", "model", "language"], "properties": { "assetId": { "type": "string" }, "kind": { "type": "string", "enum": ["audio", "video"] }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] }, "language": { "type": "string", "enum": ["auto", "zh", "en"] } } }
     },
     {
       "name": "audio.transcripts",
@@ -59,7 +59,7 @@
       "name": "audio.character.create",
       "surfaces": ["api", "mcp"],
       "description": "从一段参考音频素材创建声音角色：抽取 16k 参考音并转写为角色提示词，返回异步任务。",
-      "inputSchema": { "type": "object", "required": ["assetId", "name", "model"], "properties": { "assetId": { "type": "string" }, "name": { "type": "string" }, "model": { "type": "string", "enum": ["whisper-small", "whisper-medium", "whisper-large-v3"] } } }
+      "inputSchema": { "type": "object", "required": ["assetId", "name", "model"], "properties": { "assetId": { "type": "string" }, "name": { "type": "string" }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] } } }
     },
     {
       "name": "audio.character.complete",

@@ -1,11 +1,14 @@
 /*
- * [INPUT]: 依赖 ctx.sqlite 保存转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务
- * [OUTPUT]: 注册环境检查、模型安装、转写、声音角色创建、配音合成、历史与用户确认入库 operation
+ * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务
+ * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、声音角色创建、配音合成、历史与用户确认入库 operation
  * [POS]: audio-studio 的唯一业务后端；输出先停留在 App 文件沙箱，绝不在生成时自动创建素材库 Asset
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 
 const WHISPER_MODELS = ["whisper-small", "whisper-medium", "whisper-large-v3"];
+const QWEN_MODELS = ["qwen3-asr-0.6b", "qwen3-asr-1.7b"];
+const ASR_MODELS = new Set([...WHISPER_MODELS, ...QWEN_MODELS]);
+const DOWNLOAD_SOURCES = new Set(["automatic", "huggingface", "modelscope"]);
 const KINDS = new Set(["audio", "video"]);
 const LANGUAGES = new Set(["auto", "zh", "en"]);
 const STYLES = new Set(["neutral", "calm", "excited", "gentle"]);
@@ -27,6 +30,18 @@ function ensureSchema(ctx) {
   ctx.sqlite.execute("create table if not exists audio_characters (id text primary key, name text not null, model text not null, sample_path text not null, sample_asset_id text not null default '', prompt_text text not null default '', created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
   ctx.sqlite.execute("create table if not exists audio_syntheses (id text primary key, character_id text not null, text text not null, style text not null default 'neutral', output_path text not null, mime_type text not null, saved_asset_id text not null default '', created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
   ctx.sqlite.execute("create table if not exists audio_jobs (job_id text primary key, action text not null, record_id text not null default '', started_at text not null, resolved_at text not null default '')");
+  ctx.sqlite.execute("create table if not exists audio_settings (key text primary key, value text not null)");
+}
+
+function downloadSource(ctx) {
+  ensureSchema(ctx);
+  const rows = ctx.sqlite.query("select value from audio_settings where key = 'download_source'");
+  return DOWNLOAD_SOURCES.has(rows[0]?.value) ? rows[0].value : "automatic";
+}
+
+function setDownloadSource(ctx, source) {
+  if (!DOWNLOAD_SOURCES.has(source)) throw new Error("download source must be automatic, huggingface or modelscope");
+  ctx.sqlite.execute("insert into audio_settings (key, value) values ('download_source', ?) on conflict(key) do update set value = excluded.value", [source]);
 }
 
 function parseProcess(result) {
@@ -113,9 +128,9 @@ function markFailed(ctx, action, recordID, error) {
 function status(_, ctx) {
   const activeJob = trackedJob(ctx);
   const environment = ctx.python.status();
-  if (!environment.ready) return { ready: false, pending: true, modelsRoot: "~/.recut/models/audio-studio", error: environment.error || "Python 运行环境尚未就绪。", asr: { installed: [] }, tts: { ready: false }, activeJob };
+  if (!environment.ready) return { ready: false, pending: true, modelsRoot: "~/.recut/models/audio-studio", error: environment.error || "Python 运行环境尚未就绪。", asr: { installed: [] }, tts: { ready: false }, downloadSource: downloadSource(ctx), activeJob };
   const runner = run(ctx, ["status"], 20);
-  const result = { ...runner, activeJob };
+  const result = { ...runner, downloadSource: downloadSource(ctx), activeJob };
   if (activeJob && isTerminalJob(activeJob.status) && activeJob.status !== "completed" && (activeJob.action === "prepare" || activeJob.action === "install")) {
     const logs = (activeJob.logs || []).slice(-30);
     const lastLine = [...logs].reverse().map((entry) => entry.text.trim()).find(Boolean);
@@ -137,9 +152,11 @@ function prepare(_, ctx) {
 
 function install(input, ctx) {
   const selected = value(input, "model");
-  if (!WHISPER_MODELS.includes(selected) && selected !== "cosyvoice2") throw new Error("model must be a whisper model or cosyvoice2");
+  const source = value(input, "source") || downloadSource(ctx);
+  if (!ASR_MODELS.has(selected) && selected !== "cosyvoice2") throw new Error("model must be an ASR model or cosyvoice2");
+  setDownloadSource(ctx, source);
   ensureNoActiveJob(ctx);
-  return { job: trackJob(ctx, ctx.python.run(["python/audio_runner.py", "install", "--model", selected]), "install") };
+  return { job: trackJob(ctx, ctx.python.run(["python/audio_runner.py", "install", "--model", selected, "--source", source]), "install") };
 }
 
 function transcribe(input, ctx) {
@@ -148,7 +165,7 @@ function transcribe(input, ctx) {
   const kind = value(input, "kind");
   const model = value(input, "model");
   const language = value(input, "language");
-  if (!assetID || !KINDS.has(kind) || !WHISPER_MODELS.includes(model) || !LANGUAGES.has(language)) throw new Error("assetId, kind, model and language are required");
+  if (!assetID || !KINDS.has(kind) || !ASR_MODELS.has(model) || !LANGUAGES.has(language)) throw new Error("assetId, kind, model and language are required");
   ensureNoActiveJob(ctx);
   const source = ctx.media.materialize(assetID);
   if (source.kind !== kind) throw new Error(`Selected Asset is ${source.kind}, not ${kind}.`);
@@ -210,7 +227,7 @@ function characterCreate(input, ctx) {
   const assetID = value(input, "assetId");
   const name = value(input, "name");
   const model = value(input, "model");
-  if (!assetID || !name || !WHISPER_MODELS.includes(model)) throw new Error("assetId, name and model are required");
+  if (!assetID || !name || !ASR_MODELS.has(model)) throw new Error("assetId, name and model are required");
   ensureNoActiveJob(ctx);
   const source = ctx.media.materialize(assetID);
   if (source.kind !== "audio") throw new Error(`Selected Asset is ${source.kind}, not audio.`);

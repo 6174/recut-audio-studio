@@ -1,10 +1,13 @@
-# Platform-owned virtual environment requirements for 声音工坊.
-# ASR via faster-whisper; TTS via CosyVoice2 whose flow/hifigan use the matcha
+# [INPUT]: 平台 Python runtime、faster-whisper、Qwen3-ASR 与 CosyVoice2 的运行依赖
+# [OUTPUT]: 声音工坊唯一的锁定 Python 环境；变更会生成新的隔离 venv
+# [POS]: python/ 的依赖契约；Qwen 使用官方 qwen-asr transformers 后端，下载可选 Hugging Face 或 ModelScope
+# [PROTOCOL]: 变更时更新此头部，然后检查 README.md
+# ASR via faster-whisper and Qwen3-ASR; TTS via CosyVoice2 whose flow/hifigan use the matcha
 # modules vendored as the CosyVoice third_party/Matcha-TTS git submodule (cloned
-# by bootstrap.sh, never pip-installed). openai-whisper and modelscope are
-# intentionally absent: the runner injects a whisper shim (log_mel_spectrogram +
-# whisper.tokenizer.Tokenizer over vendored mel filters) and a modelscope shim
-# (snapshot_download), so nothing builds from source at install time.
+# by bootstrap.sh, never pip-installed). openai-whisper remains intentionally
+# absent: the runner injects a whisper shim (log_mel_spectrogram +
+# whisper.tokenizer.Tokenizer over vendored mel filters). ModelScope is present
+# only for explicit Qwen/Whisper/CosyVoice weight downloads.
 torch==2.3.1
 torchaudio==2.3.1
 torchvision==0.18.1
@@ -13,7 +16,9 @@ faster-whisper
 huggingface-hub
 onnxruntime==1.18.0
 onnx==1.16.0
-transformers==4.51.3
+transformers==4.57.6
+qwen-asr==0.0.6
+modelscope
 x-transformers==2.11.24
 conformer==0.3.2
 diffusers==0.29.0

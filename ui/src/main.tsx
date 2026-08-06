@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 Recut SDK、声音工坊 operation、平台素材选择器、素材库上传 HTTP、shadcn/ui 组件与 React 状态
- * [OUTPUT]: 对外提供环境安装、Whisper/CosyVoice 模型下载、转写文稿与 SRT、声音角色创建/试听/删除、角色配音合成与试听、私有预览、历史、实时计时/日志、任务停止和用户确认入库工作台
+ * [OUTPUT]: 对外提供 Download Source、Whisper/Qwen/CosyVoice 模型下载、转写文稿与 SRT、声音角色创建/试听/删除、角色配音合成与试听、私有预览、历史、实时计时/日志、任务停止和用户确认入库工作台
  * [POS]: audio-studio UI 编排层；仅在环境和选定模型就绪后开放推理，生成结果先留在 App 私有文件区
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
@@ -18,15 +18,23 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { recut } from "./recut-sdk";
-import type { ActiveAudioJob, Language, MediaAsset, RuntimeStatus, ShellJob, ShellJobLog, Synthesis, TranscriptDetail, TranscriptSegment, TranscriptSummary, VoiceCharacter, VoiceStyle, WhisperModel } from "./types";
+import type { ActiveAudioJob, DownloadSource, Language, MediaAsset, RuntimeStatus, ShellJob, ShellJobLog, SpeechModel, Synthesis, TranscriptDetail, TranscriptSegment, TranscriptSummary, VoiceCharacter, VoiceStyle } from "./types";
 import "./index.css";
 
 type Tab = "transcribe" | "characters" | "synthesize";
 
-const whisperModels: { id: WhisperModel; label: string; note: string }[] = [
-  { id: "whisper-small", label: "Small", note: "最快，适合快速预览" },
-  { id: "whisper-medium", label: "Medium", note: "质量与速度平衡（推荐）" },
-  { id: "whisper-large-v3", label: "Large", note: "最佳中文质量，更慢" },
+const speechModels: { id: SpeechModel; label: string; note: string }[] = [
+  { id: "qwen3-asr-0.6b", label: "Qwen3 ASR 0.6B", note: "Qwen，高精度与速度平衡（推荐）" },
+  { id: "qwen3-asr-1.7b", label: "Qwen3 ASR 1.7B", note: "Qwen，最高识别质量，需要更多内存" },
+  { id: "whisper-small", label: "Whisper Small", note: "最快，适合快速预览" },
+  { id: "whisper-medium", label: "Whisper Medium", note: "质量与速度平衡" },
+  { id: "whisper-large-v3", label: "Whisper Large-v3", note: "高精度，更慢" },
+];
+
+const downloadSources: { id: DownloadSource; label: string; note: string }[] = [
+  { id: "automatic", label: "自动", note: "优先 Hugging Face，不可用时切换 ModelScope" },
+  { id: "huggingface", label: "Hugging Face", note: "官方全球源" },
+  { id: "modelscope", label: "ModelScope", note: "中国大陆访问通常更稳定" },
 ];
 
 const languages: { id: Language; label: string }[] = [
@@ -66,7 +74,8 @@ function App() {
   const [sourceKind, setSourceKind] = useState<"audio" | "video">("audio");
   const [assetId, setAssetId] = useState("");
   const [selectedAsset, setSelectedAsset] = useState<MediaAsset | null>(null);
-  const [model, setModel] = useState<WhisperModel>("whisper-medium");
+  const [model, setModel] = useState<SpeechModel>("qwen3-asr-0.6b");
+  const [downloadSource, setDownloadSource] = useState<DownloadSource>("automatic");
   const [language, setLanguage] = useState<Language>("auto");
   const [characterName, setCharacterName] = useState("");
   const [characterAssetId, setCharacterAssetId] = useState("");
@@ -94,6 +103,7 @@ function App() {
     try {
       const nextStatus = await recut.state.query("audio.status") as RuntimeStatus;
       setStatus(nextStatus);
+      if (nextStatus.downloadSource) setDownloadSource(nextStatus.downloadSource);
       setMessage(nextStatus.activeJob && isValidActiveJob(nextStatus.activeJob) ? "本地任务正在执行。" : nextStatus.ready ? "运行环境就绪，请开始使用。" : "正在启动…");
       try {
         const [nextTranscripts, nextCharacters, nextSyntheses] = await Promise.all([
@@ -189,7 +199,7 @@ function App() {
 
   const compatibleAssets = useMemo(() => assets.filter((asset) => asset.kind === sourceKind), [assets, sourceKind]);
   const sourceAsset = selectedAsset?.id === assetId ? selectedAsset : compatibleAssets.find((asset) => asset.id === assetId) ?? null;
-  const readyWhisperModel = Boolean(status?.asr.installed.includes(model));
+  const readySpeechModel = Boolean(status?.asr.installed.includes(model));
   const ttsReady = Boolean(status?.tts.ready);
   const running = busy === "prepare" || busy === "install" || busy === "transcribe" || busy === "character" || busy === "synthesize";
 
@@ -199,17 +209,17 @@ function App() {
     void syncJob().catch((error) => setMessage(error instanceof Error ? error.message : "无法读取本地任务日志。"));
   };
 
-  const installWhisper = async () => {
+  const installSpeechModel = async () => {
     setBusy("install"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage(`正在下载 ${whisperModels.find((item) => item.id === model)?.label} 模型…`);
-    try { const result = await recut.background.call("audio.install", { model }) as { job: ShellJob }; beginJob(result.job, "install"); }
+    setMessage(`正在下载 ${speechModels.find((item) => item.id === model)?.label} 模型…`);
+    try { const result = await recut.background.call("audio.install", { model, source: downloadSource }) as { job: ShellJob }; beginJob(result.job, "install"); }
     catch (error) { setMessage(error instanceof Error ? error.message : "安装失败。"); setBusy(null); }
   };
 
   const installCosyVoice = async () => {
     setBusy("install"); setFailure(""); showLogsForNewJob(); setLogs([]);
     setMessage("正在下载 CosyVoice2-0.5B 权重（约 2.7GB）…");
-    try { const result = await recut.background.call("audio.install", { model: "cosyvoice2" }) as { job: ShellJob }; beginJob(result.job, "install"); }
+    try { const result = await recut.background.call("audio.install", { model: "cosyvoice2", source: downloadSource }) as { job: ShellJob }; beginJob(result.job, "install"); }
     catch (error) { setMessage(error instanceof Error ? error.message : "安装失败。"); setBusy(null); }
   };
 
@@ -330,8 +340,8 @@ function App() {
   if (!status?.ready) return <Setup autoPrepare={status !== null} busy={busy} elapsedSeconds={elapsedSeconds} failure={failure || status?.setupError || (!status?.pending ? status?.error || "" : "")} failureLogs={status?.setupLogs ?? []} logs={logs} message={message} onPrepare={() => void prepare()} onAskAgent={() => void askAgent()} />;
 
   const controls = <div className="flex flex-col gap-6">
-    {tab === "transcribe" && <TranscribeControls busy={busy} language={language} model={model} readyWhisperModel={readyWhisperModel} setLanguage={setLanguage} setModel={setModel} sourceAsset={sourceAsset} sourceKind={sourceKind} upload={(file) => void upload(file, "source")} onChoose={() => void chooseSource([sourceKind])} onRun={() => void transcribeSource()} onInstall={() => void installWhisper()} onKindChange={(kind) => { setSourceKind(kind); setAssetId(""); setSelectedAsset(null); }} />}
-    {tab === "characters" && <CharacterControls busy={busy} characterAsset={characterAsset} characterName={characterName} model={model} readyWhisperModel={readyWhisperModel} setCharacterName={setCharacterName} setModel={setModel} upload={(file) => void upload(file, "character")} onChoose={() => void chooseCharacterSource()} onRun={() => void createCharacter()} onInstall={() => void installWhisper()} />}
+    {tab === "transcribe" && <TranscribeControls busy={busy} downloadSource={downloadSource} language={language} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setLanguage={setLanguage} setModel={setModel} sourceAsset={sourceAsset} sourceKind={sourceKind} upload={(file) => void upload(file, "source")} onChoose={() => void chooseSource([sourceKind])} onRun={() => void transcribeSource()} onInstall={() => void installSpeechModel()} onKindChange={(kind) => { setSourceKind(kind); setAssetId(""); setSelectedAsset(null); }} />}
+    {tab === "characters" && <CharacterControls busy={busy} characterAsset={characterAsset} characterName={characterName} downloadSource={downloadSource} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setCharacterName={setCharacterName} setModel={setModel} upload={(file) => void upload(file, "character")} onChoose={() => void chooseCharacterSource()} onRun={() => void createCharacter()} onInstall={() => void installSpeechModel()} />}
     {tab === "synthesize" && <SynthesizeControls busy={busy} characters={characters} setSynthesisCharacterId={setSynthesisCharacterId} setSynthesisText={setSynthesisText} setStyle={setStyle} style={style} synthesisCharacterId={synthesisCharacterId} synthesisText={synthesisText} ttsReady={ttsReady} onRun={() => void synthesizeVoice()} onInstall={() => void installCosyVoice()} />}
   </div>;
 
@@ -367,13 +377,25 @@ function ControlSection({ title, eyebrow, children }: { title: string; eyebrow: 
   return <section className="grid gap-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{eyebrow}</p><h2 className="mt-0.5 text-sm font-semibold">{title}</h2></div>{children}</section>;
 }
 
-function ModelSelect({ disabled, model, onChange }: { disabled: boolean; model: WhisperModel; onChange: (value: WhisperModel) => void }) {
+function ModelSelect({ disabled, model, onChange }: { disabled: boolean; model: SpeechModel; onChange: (value: SpeechModel) => void }) {
   return <div className="grid gap-2">
-    <Label htmlFor="whisper-model" className="text-xs text-muted-foreground">Whisper 模型尺寸</Label>
-    <Select disabled={disabled} onValueChange={(value) => onChange(value as WhisperModel)} value={model}>
-      <SelectTrigger id="whisper-model" className="h-9"><SelectValue placeholder="选择模型" /></SelectTrigger>
-      <SelectContent>{whisperModels.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.note}</SelectItem>)}</SelectContent>
+    <Label htmlFor="speech-model" className="text-xs text-muted-foreground">本地语音模型</Label>
+    <Select disabled={disabled} onValueChange={(value) => onChange(value as SpeechModel)} value={model}>
+      <SelectTrigger id="speech-model" className="h-9"><SelectValue placeholder="选择模型" /></SelectTrigger>
+      <SelectContent>{speechModels.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.note}</SelectItem>)}</SelectContent>
     </Select>
+  </div>;
+}
+
+function DownloadSourceSelect({ disabled, source, onChange }: { disabled: boolean; source: DownloadSource; onChange: (value: DownloadSource) => void }) {
+  const selected = downloadSources.find((item) => item.id === source);
+  return <div className="grid gap-2">
+    <Label htmlFor="download-source" className="text-xs text-muted-foreground">下载来源</Label>
+    <Select disabled={disabled} onValueChange={(value) => onChange(value as DownloadSource)} value={source}>
+      <SelectTrigger id="download-source" className="h-9"><SelectValue placeholder="选择下载来源" /></SelectTrigger>
+      <SelectContent>{downloadSources.map((item) => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}</SelectContent>
+    </Select>
+    <p className="text-[11px] leading-relaxed text-muted-foreground">{selected?.note}</p>
   </div>;
 }
 
@@ -385,7 +407,7 @@ function SourceButtons({ busy, onChoose, selectedLabel, onUpload }: { busy: bool
   </div>;
 }
 
-function TranscribeControls({ busy, language, model, readyWhisperModel, setLanguage, setModel, sourceAsset, sourceKind, upload, onChoose, onRun, onInstall, onKindChange }: { busy: string | null; language: Language; model: WhisperModel; readyWhisperModel: boolean; setLanguage: (value: Language) => void; setModel: (value: WhisperModel) => void; sourceAsset: MediaAsset | null; sourceKind: "audio" | "video"; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void; onKindChange: (kind: "audio" | "video") => void }) {
+function TranscribeControls({ busy, downloadSource, language, model, readySpeechModel, setDownloadSource, setLanguage, setModel, sourceAsset, sourceKind, upload, onChoose, onRun, onInstall, onKindChange }: { busy: string | null; downloadSource: DownloadSource; language: Language; model: SpeechModel; readySpeechModel: boolean; setDownloadSource: (value: DownloadSource) => void; setLanguage: (value: Language) => void; setModel: (value: SpeechModel) => void; sourceAsset: MediaAsset | null; sourceKind: "audio" | "video"; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void; onKindChange: (kind: "audio" | "video") => void }) {
   return <CardContent className="flex flex-col gap-6">
     <ControlSection eyebrow="输入" title="选择音视频素材">
       <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/50 p-1">
@@ -395,19 +417,20 @@ function TranscribeControls({ busy, language, model, readyWhisperModel, setLangu
       {sourceAsset && <SelectedSource asset={sourceAsset} />}
     </ControlSection>
     <Separator />
-    <ControlSection eyebrow="模型" title="Whisper 本地权重">
+    <ControlSection eyebrow="模型" title="本地语音权重">
       <ModelSelect disabled={busy !== null} model={model} onChange={setModel} />
-      {readyWhisperModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />已下载</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载此模型</Button>}
+      <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
+      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />已下载</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载此模型</Button>}
     </ControlSection>
     <Separator />
     <ControlSection eyebrow="语言" title="转写语言">
       <div className="grid grid-cols-3 gap-1 rounded-md border bg-muted/50 p-1">{languages.map((item) => <Button className={cn(language === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setLanguage(item.id)} type="button" variant="ghost" size="sm">{item.label}</Button>)}</div>
     </ControlSection>
-    <Button disabled={busy !== null || !sourceAsset || !readyWhisperModel} onClick={onRun} type="button" size="lg">{busy === "transcribe" ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquareText className="size-4" />}开始转写</Button>
+    <Button disabled={busy !== null || !sourceAsset || !readySpeechModel} onClick={onRun} type="button" size="lg">{busy === "transcribe" ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquareText className="size-4" />}开始转写</Button>
   </CardContent>;
 }
 
-function CharacterControls({ busy, characterAsset, characterName, model, readyWhisperModel, setCharacterName, setModel, upload, onChoose, onRun, onInstall }: { busy: string | null; characterAsset: MediaAsset | null; characterName: string; model: WhisperModel; readyWhisperModel: boolean; setCharacterName: (value: string) => void; setModel: (value: WhisperModel) => void; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void }) {
+function CharacterControls({ busy, characterAsset, characterName, downloadSource, model, readySpeechModel, setDownloadSource, setCharacterName, setModel, upload, onChoose, onRun, onInstall }: { busy: string | null; characterAsset: MediaAsset | null; characterName: string; downloadSource: DownloadSource; model: SpeechModel; readySpeechModel: boolean; setDownloadSource: (value: DownloadSource) => void; setCharacterName: (value: string) => void; setModel: (value: SpeechModel) => void; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void }) {
   return <CardContent className="flex flex-col gap-6">
     <ControlSection eyebrow="输入" title="创建声音角色">
       <p className="text-xs leading-relaxed text-muted-foreground">用一段 5~15 秒干净人声创建可复用角色；超过 30 秒会被自动裁剪。</p>
@@ -419,11 +442,12 @@ function CharacterControls({ busy, characterAsset, characterName, model, readyWh
       </div>
     </ControlSection>
     <Separator />
-    <ControlSection eyebrow="模型" title="提示词转写模型">
+    <ControlSection eyebrow="模型" title="提示词语音模型">
       <ModelSelect disabled={busy !== null} model={model} onChange={setModel} />
-      {readyWhisperModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />已下载</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载此模型</Button>}
+      <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
+      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />已下载</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载此模型</Button>}
     </ControlSection>
-    <Button disabled={busy !== null || !characterAsset || !characterName.trim() || !readyWhisperModel} onClick={onRun} type="button" size="lg">{busy === "character" ? <LoaderCircle className="size-4 animate-spin" /> : <Mic className="size-4" />}创建声音角色</Button>
+    <Button disabled={busy !== null || !characterAsset || !characterName.trim() || !readySpeechModel} onClick={onRun} type="button" size="lg">{busy === "character" ? <LoaderCircle className="size-4 animate-spin" /> : <Mic className="size-4" />}创建声音角色</Button>
   </CardContent>;
 }
 
@@ -489,7 +513,7 @@ function TranscriptOutput({ transcript, onEditSegment }: { transcript: Transcrip
     </div>
     <div className="grid flex-1 place-items-center">
       {transcript ? <div className="grid w-full max-w-2xl gap-3">
-        <div className="flex flex-wrap items-center gap-1.5"><Badge variant="secondary">{transcript.sourceKind === "video" ? "视频" : "音频"} · {whisperModels.find((item) => item.id === transcript.model)?.label ?? transcript.model}</Badge><Badge variant="secondary">{transcript.language === "auto" ? "自动检测" : transcript.language === "zh" ? "中文" : "英文"}</Badge><Badge variant="secondary">{transcript.duration.toFixed(1)} 秒</Badge><Badge variant="secondary">{transcript.segments.length} 段</Badge></div>
+        <div className="flex flex-wrap items-center gap-1.5"><Badge variant="secondary">{transcript.sourceKind === "video" ? "视频" : "音频"} · {speechModels.find((item) => item.id === transcript.model)?.label ?? transcript.model}</Badge><Badge variant="secondary">{transcript.language === "auto" ? "自动检测" : transcript.language === "zh" ? "中文" : "英文"}</Badge><Badge variant="secondary">{transcript.duration.toFixed(1)} 秒</Badge><Badge variant="secondary">{transcript.segments.length} 段</Badge></div>
         <div className="max-h-[340px] overflow-auto rounded-md border">{transcript.segments.map((segment, index) => <div className="grid grid-cols-[132px_minmax(0,1fr)] items-center gap-3 border-b px-3 py-1.5 last:border-0" key={`${transcript.id}-${index}`}><span className="font-mono text-[11px] whitespace-nowrap text-muted-foreground">{formatTimecode(segment.start).replace(",", " ").slice(0, 8)} → {formatTimecode(segment.end).replace(",", " ").slice(0, 8)}</span><Input aria-label={`第 ${index + 1} 段文本`} className="h-8 border-transparent bg-transparent shadow-none hover:border-border focus-visible:bg-background" onChange={(event) => onEditSegment(index, event.target.value)} value={segment.text} /></div>)}</div>
         <div className="flex items-center justify-between gap-3"><Button onClick={() => setShowSRT((visible) => !visible)} type="button" variant="ghost" size="sm" className="w-fit px-0 text-primary hover:bg-transparent hover:text-primary"><FileAudio className="size-3.5" />{showSRT ? "收起 SRT" : "预览 SRT"}</Button><p className="text-[11px] text-muted-foreground">文本可编辑，复制或下载会使用编辑后的内容。</p></div>
         {showSRT && <pre className="max-h-52 overflow-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{srt}</pre>}
@@ -533,7 +557,7 @@ function BottomPanel({ activeTab, cancelling, elapsedSeconds, logs, onCancel, on
 }
 
 function History({ tab, transcripts, characters, syntheses }: { tab: Tab; transcripts: TranscriptSummary[]; characters: VoiceCharacter[]; syntheses: Synthesis[] }) {
-  const items = tab === "transcribe" ? transcripts.map((item) => ({ key: item.id, title: item.sourceKind === "video" ? "视频转写" : "音频转写", note: `${whisperModels.find((m) => m.id === item.model)?.label ?? item.model} · ${item.language === "auto" ? "自动" : item.language} · ${item.duration.toFixed(1)}s`, at: timestamp(item.createdAt) }))
+  const items = tab === "transcribe" ? transcripts.map((item) => ({ key: item.id, title: item.sourceKind === "video" ? "视频转写" : "音频转写", note: `${speechModels.find((m) => m.id === item.model)?.label ?? item.model} · ${item.language === "auto" ? "自动" : item.language} · ${item.duration.toFixed(1)}s`, at: timestamp(item.createdAt) }))
     : tab === "characters" ? characters.map((item) => ({ key: item.id, title: item.name, note: item.promptText ? `提示词已就绪 · ${item.promptText.length} 字` : "提示词未生成", at: timestamp(item.createdAt) }))
     : syntheses.map((item) => ({ key: item.id, title: styles.find((s) => s.id === item.style)?.label ?? item.style, note: item.text.slice(0, 36) + (item.text.length > 36 ? "…" : ""), at: timestamp(item.createdAt) }));
   return <div aria-labelledby="audio-history-tab" id="audio-history" role="tabpanel"><div className="flex items-center justify-between border-b px-4 py-2.5"><h3 className="text-sm font-semibold">全部输出</h3><span className="font-mono text-[11px] text-muted-foreground">{items.length} 条</span></div>{items.length ? <ul className="divide-y">{items.map((item) => <li className="flex items-center justify-between gap-3 px-4 py-2" key={item.key}><div className="grid min-w-0 gap-0.5"><strong className="truncate text-xs">{item.title}</strong><span className="truncate text-[11px] text-muted-foreground">{item.note}</span></div><span className="font-mono text-[10px] text-muted-foreground">{item.at}</span></li>)}</ul> : <p className="px-4 py-4 text-xs text-muted-foreground">还没有历史输出。</p>}</div>;

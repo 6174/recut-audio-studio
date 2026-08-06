@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-[INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、faster-whisper、CosyVoice 官方仓库与 CosyVoice2-0.5B 权重、FFmpeg
+[INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、faster-whisper、Qwen3-ASR、CosyVoice 官方仓库与 CosyVoice2-0.5B 权重、FFmpeg
 [OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备与合成进度；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、16k 角色参考音与合成 wav
 [POS]: audio-studio 的本地执行入口；依赖和模型固定到 .recut/models/audio-studio，不写入素材库
 [PROTOCOL]: 变更时更新此头部，然后检查 README.md
@@ -23,6 +23,15 @@ WHISPER_REPOS = {
     "whisper-medium": "Systran/faster-whisper-medium",
     "whisper-large-v3": "Systran/faster-whisper-large-v3",
 }
+QWEN_MODELS = ["qwen3-asr-0.6b", "qwen3-asr-1.7b"]
+QWEN_REPOS = {
+    "qwen3-asr-0.6b": "Qwen/Qwen3-ASR-0.6B",
+    "qwen3-asr-1.7b": "Qwen/Qwen3-ASR-1.7B",
+}
+QWEN_ALIGNER_REPO = "Qwen/Qwen3-ForcedAligner-0.6B"
+QWEN_LANGUAGE_MAP = {"auto": None, "zh": "Chinese", "en": "English"}
+ASR_MODELS = WHISPER_MODELS + QWEN_MODELS
+DOWNLOAD_SOURCES = {"automatic", "huggingface", "modelscope"}
 COSYVOICE_HF = "FunAudioLLM/CosyVoice2-0.5B"
 COSYVOICE_MODEL_DIR = "cosyvoice/pretrained_models/CosyVoice2-0.5B"
 COSYVOICE_REPOSITORY = "cosyvoice/repository"
@@ -65,8 +74,8 @@ def display_size(size: float) -> str:
     return f"{size / (1024 * 1024):.1f} MiB"
 
 
-def download_repo(repo_id: str, target_dir: Path, cache: bool) -> None:
-    """Per-file download with readable byte progress; keeps HuggingFace's own tqdm quiet."""
+def download_huggingface_repo(repo_id: str, target_dir: Path, cache: bool = False) -> None:
+    """Download into the App-owned model directory with readable progress."""
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     from huggingface_hub import hf_hub_download, repo_info
 
@@ -87,8 +96,76 @@ def download_repo(repo_id: str, target_dir: Path, cache: bool) -> None:
     print(f"[audio] {repo_id} 下载完成。", flush=True)
 
 
+def download_modelscope_repo(repo_id: str, target_dir: Path) -> None:
+    from modelscope import snapshot_download
+
+    print(f"[audio] 正在从 ModelScope 下载 {repo_id}。", flush=True)
+    snapshot_download(repo_id, local_dir=str(target_dir))
+    print(f"[audio] {repo_id} 下载完成。", flush=True)
+
+
+def download_repo(repo_id: str, target_dir: Path, source: str) -> None:
+    if source not in DOWNLOAD_SOURCES:
+        raise RuntimeError(f"unknown download source {source}")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if source == "huggingface":
+        download_huggingface_repo(repo_id, target_dir)
+        return
+    if source == "modelscope":
+        download_modelscope_repo(repo_id, target_dir)
+        return
+    try:
+        print(f"[audio] 自动下载：先尝试 Hugging Face。", flush=True)
+        download_huggingface_repo(repo_id, target_dir)
+    except Exception as error:
+        print(f"[audio] Hugging Face 不可用（{error}），改用 ModelScope。", flush=True)
+        download_modelscope_repo(repo_id, target_dir)
+
+
 def whisper_dir() -> Path:
     return model_root() / "whisper"
+
+
+def whisper_model(model_id: str) -> Path:
+    return whisper_dir() / model_id
+
+
+def downloaded_whisper(model_id: str) -> bool:
+    cache_dir = whisper_dir() / f"models--Systran--faster-whisper-{WHISPER_MAP[model_id]}"
+    direct_dir = whisper_model(model_id)
+    return cache_dir.is_dir() or ((direct_dir / "config.json").is_file() and (direct_dir / "model.bin").is_file())
+
+
+def download_whisper(model_id: str, source: str) -> None:
+    repo_id = WHISPER_REPOS[model_id]
+    if source == "huggingface":
+        download_huggingface_repo(repo_id, whisper_dir(), cache=True)
+        return
+    if source == "modelscope":
+        download_modelscope_repo(repo_id, whisper_model(model_id))
+        return
+    try:
+        print("[audio] 自动下载：先尝试 Hugging Face。", flush=True)
+        download_huggingface_repo(repo_id, whisper_dir(), cache=True)
+    except Exception as error:
+        print(f"[audio] Hugging Face 不可用（{error}），改用 ModelScope。", flush=True)
+        download_modelscope_repo(repo_id, whisper_model(model_id))
+
+
+def qwen_dir() -> Path:
+    return model_root() / "qwen3-asr"
+
+
+def qwen_model(model_id: str) -> Path:
+    return qwen_dir() / QWEN_REPOS[model_id].split("/")[-1]
+
+
+def qwen_aligner() -> Path:
+    return qwen_dir() / QWEN_ALIGNER_REPO.split("/")[-1]
+
+
+def downloaded_model(path: Path) -> bool:
+    return (path / "config.json").is_file() and any(path.glob("*.safetensors"))
 
 
 def cosyvoice_repo() -> Path:
@@ -104,7 +181,9 @@ def state(root: Path) -> dict:
     if not shutil.which("ffmpeg"):
         problems.append("FFmpeg is not available on PATH. Install it, then retry.")
     whisper = whisper_dir()
-    installed = [name for name in WHISPER_MODELS if (whisper / f"models--Systran--faster-whisper-{WHISPER_MAP[name]}").is_dir()]
+    installed = [name for name in WHISPER_MODELS if downloaded_whisper(name)]
+    aligner_ready = downloaded_model(qwen_aligner())
+    installed.extend(name for name in QWEN_MODELS if downloaded_model(qwen_model(name)) and aligner_ready)
     repository_ready = (cosyvoice_repo() / "cosyvoice" / "cli" / "cosyvoice.py").is_file() and (cosyvoice_repo() / "third_party" / "Matcha-TTS" / "matcha").is_dir()
     model_ready = (cosyvoice_model() / "cosyvoice2.yaml").is_file()
     if not repository_ready:
@@ -112,7 +191,7 @@ def state(root: Path) -> dict:
     return {
         "ready": not problems,
         "modelsRoot": str(root),
-        "asr": {"installed": installed},
+        "asr": {"installed": installed, "qwenAligner": aligner_ready},
         "tts": {"repository": repository_ready, "model": model_ready, "ready": repository_ready and model_ready},
         "error": " ".join(problems),
     }
@@ -134,16 +213,20 @@ def probe_duration(path: Path) -> float:
         return 0.0
 
 
-def install(selected: str) -> None:
+def install(selected: str, source: str) -> None:
     if selected in WHISPER_MODELS:
-        target = whisper_dir()
-        target.mkdir(parents=True, exist_ok=True)
-        download_repo(WHISPER_REPOS[selected], target, cache=True)
+        download_whisper(selected, source)
         print(f"[audio] {selected} 模型已就绪。", flush=True)
+    elif selected in QWEN_MODELS:
+        target = qwen_model(selected)
+        download_repo(QWEN_REPOS[selected], target, source)
+        if not downloaded_model(qwen_aligner()):
+            print("[audio] 正在下载 Qwen 时间戳对齐器。", flush=True)
+            download_repo(QWEN_ALIGNER_REPO, qwen_aligner(), source)
+        print(f"[audio] {selected} 模型与时间戳对齐器已就绪。", flush=True)
     elif selected == "cosyvoice2":
         target = cosyvoice_model()
-        target.mkdir(parents=True, exist_ok=True)
-        download_repo(COSYVOICE_HF, target, cache=False)
+        download_repo(COSYVOICE_HF, target, source)
         print("[audio] CosyVoice2-0.5B 权重已就绪。", flush=True)
     else:
         emit({"ready": False, "error": f"unknown install target {selected}"}, 1)
@@ -168,12 +251,89 @@ def build_srt(segments: list) -> str:
 def load_whisper(model_id: str):
     from faster_whisper import WhisperModel
 
-    return WhisperModel(WHISPER_MAP[model_id], device="cpu", compute_type="int8", download_root=str(whisper_dir()))
+    direct_dir = whisper_model(model_id)
+    source = str(direct_dir) if downloaded_whisper(model_id) and (direct_dir / "model.bin").is_file() else WHISPER_MAP[model_id]
+    return WhisperModel(source, device="cpu", compute_type="int8", download_root=str(whisper_dir()))
+
+
+def load_qwen(model_id: str):
+    import torch
+    from qwen_asr import Qwen3ASRModel
+
+    use_cuda = torch.cuda.is_available()
+    return Qwen3ASRModel.from_pretrained(
+        str(qwen_model(model_id)),
+        dtype=torch.bfloat16 if use_cuda else torch.float32,
+        device_map="cuda:0" if use_cuda else "cpu",
+        forced_aligner=str(qwen_aligner()),
+        forced_aligner_kwargs={"dtype": torch.bfloat16 if use_cuda else torch.float32, "device_map": "cuda:0" if use_cuda else "cpu"},
+        max_inference_batch_size=1,
+        max_new_tokens=4096,
+    )
+
+
+def join_aligned_text(current: str, next_text: str) -> str:
+    if current and next_text and current[-1].isascii() and current[-1].isalnum() and next_text[0].isascii() and next_text[0].isalnum():
+        return f"{current} {next_text}"
+    return f"{current}{next_text}"
+
+
+def qwen_segments(time_stamps: object, duration: float) -> list:
+    units = []
+    for item in time_stamps or []:
+        text = str(getattr(item, "text", "")).strip()
+        start = float(getattr(item, "start_time", 0) or 0)
+        end = float(getattr(item, "end_time", start) or start)
+        if text and end >= start:
+            units.append({"start": start, "end": end, "text": text})
+    entries = []
+    current = None
+    for unit in units:
+        if current is None:
+            current = {"start": unit["start"], "end": unit["end"], "text": unit["text"]}
+            continue
+        current["text"] = join_aligned_text(current["text"], unit["text"])
+        current["end"] = unit["end"]
+        ends_sentence = unit["text"].endswith(("。", "！", "？", ".", "!", "?", "；", ";"))
+        too_long = len(current["text"]) >= 28 or current["end"] - current["start"] >= 6
+        if ends_sentence or too_long:
+            entries.append({"start": round(current["start"], 3), "end": round(current["end"], 3), "text": current["text"], "speaker": "", "emotion": ""})
+            current = None
+    if current is not None:
+        entries.append({"start": round(current["start"], 3), "end": round(current["end"], 3), "text": current["text"], "speaker": "", "emotion": ""})
+    if entries:
+        return entries
+    raise RuntimeError(f"Qwen 时间戳对齐器没有返回有效结果（音频时长 {duration:.1f}s）。")
+
+
+def transcribe_whisper(model_id: str, audio: Path, language: str) -> tuple[list, str, float, float]:
+    whisper = load_whisper(model_id)
+    language_code = None if language in ("", "auto") else language
+    segments, info = whisper.transcribe(str(audio), language=language_code, vad_filter=True)
+    entries = []
+    for segment in segments:
+        entry = {"start": round(float(segment.start), 3), "end": round(float(segment.end), 3), "text": segment.text.strip(), "speaker": "", "emotion": ""}
+        entries.append(entry)
+        print(f"[audio] {format_timecode(segment.start)} → {format_timecode(segment.end)}：{entry['text']}", flush=True)
+    return entries, info.language, float(info.language_probability), float(info.duration)
+
+
+def transcribe_qwen(model_id: str, audio: Path, language: str) -> tuple[list, str, float, float]:
+    duration = probe_duration(audio)
+    qwen = load_qwen(model_id)
+    results = qwen.transcribe(audio=str(audio), language=QWEN_LANGUAGE_MAP[language], return_time_stamps=True)
+    if not results:
+        raise RuntimeError("Qwen 未返回转写结果。")
+    result = results[0]
+    entries = qwen_segments(getattr(result, "time_stamps", None), duration)
+    for entry in entries:
+        print(f"[audio] {format_timecode(entry['start'])} → {format_timecode(entry['end'])}：{entry['text']}", flush=True)
+    return entries, str(getattr(result, "language", "")), 1.0, duration
 
 
 def transcribe(model_id: str, language: str, source_relative: str, stem_relative: str) -> None:
     current = state(model_root())
-    if not current["ready"] or model_id not in WHISPER_MODELS:
+    if not current["ready"] or model_id not in ASR_MODELS or model_id not in current["asr"]["installed"]:
         emit({"ready": False, "error": current["error"] or f"Model {model_id} has not been installed."}, 1)
     source = safe_file(source_relative)
     stem = safe_file(stem_relative)
@@ -183,20 +343,13 @@ def transcribe(model_id: str, language: str, source_relative: str, stem_relative
         print("[audio] 正在抽取音频轨道。", flush=True)
         extract_audio(source, audio)
         print(f"[audio] 正在加载 {model_id} 模型。", flush=True)
-        whisper = load_whisper(model_id)
-        language_code = None if language in ("", "auto") else language
         print("[audio] 开始转写。", flush=True)
-        segments, info = whisper.transcribe(str(audio), language=language_code, vad_filter=True)
-        entries = []
-        for segment in segments:
-            entry = {"start": round(float(segment.start), 3), "end": round(float(segment.end), 3), "text": segment.text.strip(), "speaker": "", "emotion": ""}
-            entries.append(entry)
-            print(f"[audio] {format_timecode(segment.start)} → {format_timecode(segment.end)}：{entry['text']}", flush=True)
+        entries, detected_language, probability, duration = transcribe_whisper(model_id, audio, language) if model_id in WHISPER_MODELS else transcribe_qwen(model_id, audio, language)
         transcript = {
             "model": model_id,
-            "language": info.language,
-            "languageProbability": round(float(info.language_probability), 4),
-            "duration": round(float(info.duration), 3),
+            "language": detected_language,
+            "languageProbability": round(probability, 4),
+            "duration": round(duration, 3),
             "segments": entries,
         }
         json_path = stem.with_suffix(".json")
@@ -204,14 +357,14 @@ def transcribe(model_id: str, language: str, source_relative: str, stem_relative
         json_path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2), encoding="utf-8")
         srt_path.write_text(build_srt(entries), encoding="utf-8")
         print(f"[audio] 转写完成：{len(entries)} 段，{transcript['duration']:.1f} 秒。", flush=True)
-        emit({"ready": True, "output": stem_relative, "language": info.language, "segments": len(entries), "srt": str(srt_path.relative_to(files_root())), "transcript": str(json_path.relative_to(files_root()))})
+        emit({"ready": True, "output": stem_relative, "language": detected_language, "segments": len(entries), "srt": str(srt_path.relative_to(files_root())), "transcript": str(json_path.relative_to(files_root()))})
     finally:
         audio.unlink(missing_ok=True)
 
 
 def prepare_character(model_id: str, source_relative: str, stem_relative: str) -> None:
     current = state(model_root())
-    if not current["ready"] or model_id not in WHISPER_MODELS:
+    if not current["ready"] or model_id not in ASR_MODELS or model_id not in current["asr"]["installed"]:
         emit({"ready": False, "error": current["error"] or f"Model {model_id} has not been installed."}, 1)
     source = safe_file(source_relative)
     stem = safe_file(stem_relative)
@@ -230,10 +383,9 @@ def prepare_character(model_id: str, source_relative: str, stem_relative: str) -
         trimmed.replace(wav)
         duration = 30.0
     print(f"[audio] 正在用 {model_id} 转写参考音，生成角色提示词。", flush=True)
-    whisper = load_whisper(model_id)
-    segments, info = whisper.transcribe(str(wav), vad_filter=True)
-    prompt_text = "".join(segment.text.strip() for segment in segments)
-    meta = {"wav": str(wav.relative_to(files_root())), "promptText": prompt_text, "duration": round(duration, 3), "language": info.language}
+    entries, detected_language, _, _ = transcribe_whisper(model_id, wav, "auto") if model_id in WHISPER_MODELS else transcribe_qwen(model_id, wav, "auto")
+    prompt_text = "".join(entry["text"] for entry in entries)
+    meta = {"wav": str(wav.relative_to(files_root())), "promptText": prompt_text, "duration": round(duration, 3), "language": detected_language}
     Path(str(wav) + ".meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[audio] 角色参考音已就绪（{duration:.1f}s）。", flush=True)
     emit({"ready": True, **meta})
@@ -296,14 +448,15 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
     install_parser = commands.add_parser("install")
-    install_parser.add_argument("--model", choices=WHISPER_MODELS + ["cosyvoice2"], required=True)
+    install_parser.add_argument("--model", choices=ASR_MODELS + ["cosyvoice2"], required=True)
+    install_parser.add_argument("--source", choices=sorted(DOWNLOAD_SOURCES), default="automatic")
     transcribe_parser = commands.add_parser("transcribe")
-    transcribe_parser.add_argument("--model", choices=WHISPER_MODELS, required=True)
+    transcribe_parser.add_argument("--model", choices=ASR_MODELS, required=True)
     transcribe_parser.add_argument("--language", choices=["auto", "zh", "en"], required=True)
     transcribe_parser.add_argument("--input", required=True)
     transcribe_parser.add_argument("--output", required=True)
     character_parser = commands.add_parser("character")
-    character_parser.add_argument("--model", choices=WHISPER_MODELS, required=True)
+    character_parser.add_argument("--model", choices=ASR_MODELS, required=True)
     character_parser.add_argument("--input", required=True)
     character_parser.add_argument("--output", required=True)
     synthesize_parser = commands.add_parser("synthesize")
@@ -317,7 +470,7 @@ def main() -> None:
         if args.command == "status":
             emit(state(model_root()))
         elif args.command == "install":
-            install(args.model)
+            install(args.model, args.source)
         elif args.command == "transcribe":
             transcribe(args.model, args.language, args.input, args.output)
         elif args.command == "character":
