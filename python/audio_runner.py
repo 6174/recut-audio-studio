@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 [INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、faster-whisper、Qwen3-ASR、CosyVoice 官方仓库与 CosyVoice2-0.5B 权重、FFmpeg
-[OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备与合成进度；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、16k 角色参考音与合成 wav
+[OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备与合成进度；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、保留与时间戳对齐的源声音轨、16k 角色参考音与合成 wav
 [POS]: audio-studio 的本地执行入口；依赖和模型固定到 .recut/models/audio-studio，不写入素材库
 [PROTOCOL]: 变更时更新此头部，然后检查 README.md
 """
@@ -191,7 +191,8 @@ def state(root: Path) -> dict:
     return {
         "ready": not problems,
         "modelsRoot": str(root),
-        "asr": {"installed": installed, "qwenAligner": aligner_ready},
+        "pythonVersion": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "asr": {"installed": installed},
         "tts": {"repository": repository_ready, "model": model_ready, "ready": repository_ready and model_ready},
         "error": " ".join(problems),
     }
@@ -338,7 +339,7 @@ def transcribe(model_id: str, language: str, source_relative: str, stem_relative
     source = safe_file(source_relative)
     stem = safe_file(stem_relative)
     stem.parent.mkdir(parents=True, exist_ok=True)
-    audio = stem.with_suffix(".input.wav")
+    audio = stem.with_suffix(".audio.wav")
     try:
         print("[audio] 正在抽取音频轨道。", flush=True)
         extract_audio(source, audio)
@@ -357,9 +358,12 @@ def transcribe(model_id: str, language: str, source_relative: str, stem_relative
         json_path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2), encoding="utf-8")
         srt_path.write_text(build_srt(entries), encoding="utf-8")
         print(f"[audio] 转写完成：{len(entries)} 段，{transcript['duration']:.1f} 秒。", flush=True)
-        emit({"ready": True, "output": stem_relative, "language": detected_language, "segments": len(entries), "srt": str(srt_path.relative_to(files_root())), "transcript": str(json_path.relative_to(files_root()))})
+        # Keep the extracted audio track so the transcript can later be saved
+        # to the media library as a single audio + SRT + JSON bundle.
+        emit({"ready": True, "output": stem_relative, "language": detected_language, "segments": len(entries), "srt": str(srt_path.relative_to(files_root())), "transcript": str(json_path.relative_to(files_root())), "audio": str(audio.relative_to(files_root()))})
     finally:
-        audio.unlink(missing_ok=True)
+        if audio.exists() and audio.stat().st_size == 0:
+            audio.unlink(missing_ok=True)
 
 
 def prepare_character(model_id: str, source_relative: str, stem_relative: str) -> None:

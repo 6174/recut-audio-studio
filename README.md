@@ -11,7 +11,7 @@
 ## 使用流程
 
 1. 在 **Apps** 中从 [recut-audio-studio](https://github.com/6174/recut-audio-studio) 安装并打开“声音工坊”。首次进入会检查 Python、FFmpeg 与模型，并由平台异步创建 manifest 声明的 venv、安装锁定依赖与执行 App bootstrap（浅克隆 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice)）。
-2. **转写**：选择 Qwen3-ASR 0.6B / 1.7B 或 Whisper Small / Medium / Large-v3（可多选），选择 Hugging Face、ModelScope 或自动回退来源，下载后选择音频或视频素材与语言；生成后先查看文稿与字幕，再按需保存或复制。Qwen 会同时安装官方时间戳对齐器。
+2. **转写**：选择 Qwen3-ASR 0.6B / 1.7B 或 Whisper Small / Medium / Large-v3（可多选），选择 Hugging Face、ModelScope 或自动回退来源，下载后选择音频或视频素材与语言；生成后先查看文稿与字幕，再按需保存或复制。保存会创建 platform 的 `transcript` 素材：一个 bundle 同时包含与时间戳对齐的源声音轨、SRT 字幕与 transcript.json，可在素材库直接播放、按分段阅读或下载 SRT/JSON。Qwen 会同时安装官方时间戳对齐器。
 3. **声音角色**：确认已安装任一语音模型，从素材库选择一段人声音频，命名后创建角色；创建过程自动生成角色提示词。
 4. **配音**：确认已下载 CosyVoice2 权重并至少有一个角色，输入文本、选择角色和情绪，生成后先试听私有预览，满意时保存到素材库。
 
@@ -27,8 +27,8 @@
 | --- | --- |
 | CosyVoice 官方代码、Whisper、Qwen3-ASR（含对齐器）与 CosyVoice2 权重 | `~/.recut/models/audio-studio/` |
 | 平台 Python venv | `~/.recut/python/envs/recut.audio-studio/audio-studio/<fingerprint>/` |
-| 输入副本、文稿、SRT、角色参考音与未保存配音 | 当前独立 App 的私有文件沙箱 |
-| 用户明确保存的配音或角色参考音 | Recut 素材库，取得真实 `assetId` |
+| 输入副本、文稿、SRT、源声音轨、角色参考音与未保存配音 | 当前独立 App 的私有文件沙箱 |
+| 用户明确保存的配音、角色参考音或转写 bundle（源声音 + SRT + JSON） | Recut 素材库，取得真实 `assetId` |
 | 转写 / 角色 / 合成记录 | 当前 App 的隔离 SQLite |
 
 ## 架构

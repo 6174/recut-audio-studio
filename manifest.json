@@ -52,7 +52,7 @@
     {
       "name": "audio.transcript",
       "surfaces": ["api"],
-      "description": "读取一条已完成的转写记录，返回文稿分段和 SRT 正文。",
+      "description": "读取一条已完成的转写记录，返回文稿分段、SRT 正文与可播放的源声音预览。",
       "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
     },
     {
@@ -100,8 +100,8 @@
     {
       "name": "audio.save",
       "surfaces": ["api", "mcp"],
-      "description": "将用户明确选择的私有配音或声音角色参考音导入素材库。",
-      "inputSchema": { "type": "object", "required": ["id", "kind"], "properties": { "id": { "type": "string" }, "kind": { "type": "string", "enum": ["synthesis", "character"] } } }
+      "description": "将用户明确选择的私有转写文稿（SRT + JSON + 源声音组合）、配音或声音角色参考音导入素材库；转写会创建 platform 的 transcript 素材。",
+      "inputSchema": { "type": "object", "required": ["id", "kind"], "properties": { "id": { "type": "string" }, "kind": { "type": "string", "enum": ["transcript", "synthesis", "character"] } } }
     },
     {
       "name": "audio.job",

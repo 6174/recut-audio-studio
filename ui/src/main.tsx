@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 Recut SDK、声音工坊 operation、平台素材选择器、素材库上传 HTTP、shadcn/ui 组件与 React 状态
- * [OUTPUT]: 对外提供 Download Source、Whisper/Qwen/CosyVoice 模型下载、转写文稿与 SRT、声音角色创建/试听/删除、角色配音合成与试听、私有预览、历史、实时计时/日志、任务停止和用户确认入库工作台
+ * [OUTPUT]: 对外提供三步声音工作流导航、Download Source、Whisper/Qwen/CosyVoice 模型下载、转写文稿与 SRT、转写保存为素材库 bundle、声音角色创建/试听/删除、角色配音合成与试听、私有预览、历史、实时计时/日志、任务停止和用户确认入库工作台
  * [POS]: audio-studio UI 编排层；仅在环境和选定模型就绪后开放推理，生成结果先留在 App 私有文件区
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
@@ -14,7 +14,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { recut } from "./recut-sdk";
@@ -94,6 +93,7 @@ function App() {
   const [currentTranscript, setCurrentTranscript] = useState<TranscriptDetail | null>(null);
   const [selectedSynthesis, setSelectedSynthesis] = useState<Synthesis | null>(null);
   const finalizingJob = useRef<string | null>(null);
+  const logsRef = useRef<ShellJobLog[]>([]);
   const bottomTabSelectedByUser = useRef(false);
 
   const selectBottomTab = useCallback((next: "history" | "logs") => { bottomTabSelectedByUser.current = true; setBottomTab(next); }, []);
@@ -104,7 +104,7 @@ function App() {
       const nextStatus = await recut.state.query("audio.status") as RuntimeStatus;
       setStatus(nextStatus);
       if (nextStatus.downloadSource) setDownloadSource(nextStatus.downloadSource);
-      setMessage(nextStatus.activeJob && isValidActiveJob(nextStatus.activeJob) ? "本地任务正在执行。" : nextStatus.ready ? "运行环境就绪，请开始使用。" : "正在启动…");
+      setMessage(nextStatus.activeJob && isValidActiveJob(nextStatus.activeJob) ? "本地任务正在执行。" : nextStatus.ready ? "运行环境就绪，请开始使用。" : nextStatus.setupError ? `运行环境准备失败：${nextStatus.setupError}` : "正在启动…");
       try {
         const [nextTranscripts, nextCharacters, nextSyntheses] = await Promise.all([
           recut.state.query("audio.transcripts") as Promise<TranscriptSummary[]>,
@@ -141,6 +141,7 @@ function App() {
     else { setActiveJob(null); setBusy(null); setCancelling(false); }
   }, [restoreJob]);
 
+  useEffect(() => { logsRef.current = logs; }, [logs]);
   useEffect(() => { window.addEventListener("recut-sdk-ready", refresh); void refresh(); return () => window.removeEventListener("recut-sdk-ready", refresh); }, [refresh]);
   useEffect(() => { void loadAssets().catch((error) => setMessage(error.message)); }, [loadAssets]);
   useEffect(() => { if (isValidActiveJob(status?.activeJob)) restoreJob(status.activeJob); }, [restoreJob, status?.activeJob]);
@@ -168,7 +169,8 @@ function App() {
     finalizingJob.current = job.id;
     try {
       if (job.status !== "completed") {
-        const error = job.error || "本地任务未完成。";
+        const tail = [...logsRef.current].reverse().map((entry) => entry.text.trim()).find(Boolean);
+        const error = tail || job.error || "本地任务未完成。";
         setFailure(error); setMessage(error);
       } else if (job.action === "transcribe" && job.recordID) {
         const detail = await recut.background.call("audio.transcript", { id: job.recordID }) as TranscriptDetail;
@@ -303,6 +305,13 @@ function App() {
     finally { setBusy(null); }
   };
 
+  const saveTranscript = async (transcript: TranscriptDetail) => {
+    setBusy("save");
+    try { const result = await recut.background.call("audio.save", { id: transcript.id, kind: "transcript" }) as { assetId: string }; setTranscripts((items) => items.map((item) => item.id === transcript.id ? { ...item, savedAssetId: result.assetId } : item)); setCurrentTranscript((current) => current && current.id === transcript.id ? { ...current, savedAssetId: result.assetId } : current); setMessage("转写文稿已保存为素材库的转写素材。"); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "保存失败。"); }
+    finally { setBusy(null); }
+  };
+
   const saveSynthesis = async (synthesis: Synthesis) => {
     setBusy("save");
     try { const result = await recut.background.call("audio.save", { id: synthesis.id, kind: "synthesis" }) as { assetId: string }; setSyntheses((items) => items.map((item) => item.id === synthesis.id ? { ...item, savedAssetId: result.assetId } : item)); setMessage("配音已保存到素材库。"); }
@@ -328,7 +337,8 @@ function App() {
     setBusy("agent");
     const details = (status?.setupLogs ?? []).map((entry) => entry.text).join("").slice(-2000);
     const context = status?.setupError || status?.error || message;
-    try { await recut.agent.compose(`声音工坊本地依赖检查或安装失败。请检查并解决这个错误，然后告诉我可以如何继续。\n错误：${context}\n日志：\n${details || "（无日志）"}`); setMessage("诊断已填入右侧 Agent 输入框；请确认后发送。"); }
+    const pythonHint = status?.pythonVersion ? `\n当前 venv 使用 Python ${status.pythonVersion}。` : "";
+    try { await recut.agent.compose(`声音工坊本地依赖检查或安装失败。请检查并解决这个错误，然后告诉我可以如何继续。\n错误：${context}${pythonHint}\n日志：\n${details || "（无日志）"}`); setMessage("诊断已填入右侧 Agent 输入框；请确认后发送。"); }
     catch (error) { setMessage(error instanceof Error ? error.message : "无法准备诊断请求。"); }
     finally { setBusy(null); }
   };
@@ -337,15 +347,15 @@ function App() {
     setCurrentTranscript((current) => current ? { ...current, segments: current.segments.map((segment, cursor) => cursor === index ? { ...segment, text } : segment) } : current);
   };
 
-  if (!status?.ready) return <Setup autoPrepare={status !== null} busy={busy} elapsedSeconds={elapsedSeconds} failure={failure || status?.setupError || (!status?.pending ? status?.error || "" : "")} failureLogs={status?.setupLogs ?? []} logs={logs} message={message} onPrepare={() => void prepare()} onAskAgent={() => void askAgent()} />;
+  if (!status?.ready) return <Setup autoPrepare={status !== null} busy={busy} elapsedSeconds={elapsedSeconds} failure={status?.setupError || failure || (!status?.pending ? status?.error || "" : "")} failureLogs={status?.setupLogs ?? []} logs={logs} message={message} pythonVersion={status?.pythonVersion} onPrepare={() => void prepare()} onAskAgent={() => void askAgent()} />;
 
   const controls = <div className="flex flex-col gap-6">
     {tab === "transcribe" && <TranscribeControls busy={busy} downloadSource={downloadSource} language={language} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setLanguage={setLanguage} setModel={setModel} sourceAsset={sourceAsset} sourceKind={sourceKind} upload={(file) => void upload(file, "source")} onChoose={() => void chooseSource([sourceKind])} onRun={() => void transcribeSource()} onInstall={() => void installSpeechModel()} onKindChange={(kind) => { setSourceKind(kind); setAssetId(""); setSelectedAsset(null); }} />}
     {tab === "characters" && <CharacterControls busy={busy} characterAsset={characterAsset} characterName={characterName} downloadSource={downloadSource} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setCharacterName={setCharacterName} setModel={setModel} upload={(file) => void upload(file, "character")} onChoose={() => void chooseCharacterSource()} onRun={() => void createCharacter()} onInstall={() => void installSpeechModel()} />}
-    {tab === "synthesize" && <SynthesizeControls busy={busy} characters={characters} setSynthesisCharacterId={setSynthesisCharacterId} setSynthesisText={setSynthesisText} setStyle={setStyle} style={style} synthesisCharacterId={synthesisCharacterId} synthesisText={synthesisText} ttsReady={ttsReady} onRun={() => void synthesizeVoice()} onInstall={() => void installCosyVoice()} />}
+    {tab === "synthesize" && <SynthesizeControls busy={busy} characters={characters} downloadSource={downloadSource} setDownloadSource={setDownloadSource} setSynthesisCharacterId={setSynthesisCharacterId} setSynthesisText={setSynthesisText} setStyle={setStyle} style={style} synthesisCharacterId={synthesisCharacterId} synthesisText={synthesisText} ttsReady={ttsReady} onRun={() => void synthesizeVoice()} onInstall={() => void installCosyVoice()} />}
   </div>;
 
-  const output = tab === "transcribe" ? <TranscriptOutput transcript={currentTranscript} onEditSegment={updateSegmentText} />
+  const output = tab === "transcribe" ? <TranscriptOutput busy={busy} onSave={(transcript) => void saveTranscript(transcript)} transcript={currentTranscript} onEditSegment={updateSegmentText} />
     : tab === "characters" ? <CharactersOutput busy={busy} characters={characters} onRemove={(character) => void removeCharacter(character)} onSave={(character) => void saveCharacter(character)} />
     : <SynthesisOutput busy={busy} onSave={(synthesis) => void saveSynthesis(synthesis)} selected={selectedSynthesis} syntheses={syntheses} />;
 
@@ -358,19 +368,43 @@ function App() {
       </div>
       <p className="text-sm text-muted-foreground">转写、声音角色与角色配音。声音是视频的一级资源，输出先留在私有区，确认后再进素材库。</p>
     </header>
-    <Tabs value={tab} onValueChange={(value) => { setTab(value as Tab); setBottomTab("history"); bottomTabSelectedByUser.current = true; }} className="mt-4">
-      <TabsList className="grid w-full grid-cols-3">
-        <TabsTrigger value="transcribe"><MessageSquareText className="size-3.5" />转写</TabsTrigger>
-        <TabsTrigger value="characters"><Mic className="size-3.5" />声音角色</TabsTrigger>
-        <TabsTrigger value="synthesize"><Sparkles className="size-3.5" />配音</TabsTrigger>
-      </TabsList>
-      <TabsContent value={tab} className="mt-4 grid grid-cols-[320px_minmax(0,1fr)] items-start gap-4">
-        <Card className="rounded-lg shadow-none">{controls}</Card>
-        <Card className="min-h-[540px] rounded-lg shadow-none">{output}</Card>
-      </TabsContent>
-    </Tabs>
+    <WorkflowNav tab={tab} onChange={(nextTab) => { setTab(nextTab); setBottomTab("history"); bottomTabSelectedByUser.current = true; }} />
+    <main className="mt-4 grid items-start gap-4 min-[700px]:grid-cols-[minmax(280px,320px)_minmax(0,1fr)]">
+      <Card className="rounded-lg shadow-none">{controls}</Card>
+      <Card className="min-h-[540px] rounded-lg shadow-none">{output}</Card>
+    </main>
     <BottomPanel activeTab={bottomTab} cancelling={cancelling} elapsedSeconds={elapsedSeconds} logs={logs} onCancel={() => void cancel()} onTabChange={selectBottomTab} running={running} tab={tab} transcripts={transcripts} characters={characters} syntheses={syntheses} />
   </div>;
+}
+
+function WorkflowNav({ tab, onChange }: { tab: Tab; onChange: (tab: Tab) => void }) {
+  const workflows: { id: Tab; number: string; icon: ReactNode; label: string; note: string }[] = [
+    { id: "transcribe", number: "01", icon: <MessageSquareText className="size-4" />, label: "转写", note: "音视频 → 文稿与字幕" },
+    { id: "characters", number: "02", icon: <Mic className="size-4" />, label: "声音角色", note: "参考音 → 可复用角色" },
+    { id: "synthesize", number: "03", icon: <Sparkles className="size-4" />, label: "配音", note: "角色 + 文本 → 音频" },
+  ];
+  const activeIndex = workflows.findIndex((item) => item.id === tab);
+  return <nav aria-label="声音工作流" className="mt-4 rounded-lg border bg-card p-3 shadow-none">
+    <div className="flex flex-wrap items-end justify-between gap-2 border-b pb-3">
+      <div>
+        <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">工作流</p>
+        <h2 className="mt-0.5 text-sm font-semibold">选择你现在要处理的声音任务</h2>
+      </div>
+      <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Step {String(activeIndex + 1).padStart(2, "0")} / 03</span>
+    </div>
+    <div className="mt-3 grid gap-2 min-[700px]:grid-cols-3">
+      {workflows.map((item) => {
+        const active = item.id === tab;
+        return <button aria-current={active ? "step" : undefined} aria-pressed={active} className={cn("group flex min-w-0 items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors", active ? "border-primary/60 bg-accent/70" : "border-transparent bg-muted/45 hover:border-border hover:bg-muted")} key={item.id} onClick={() => onChange(item.id)} type="button">
+          <span className={cn("grid size-8 shrink-0 place-items-center rounded-full border font-mono text-[10px] font-semibold", active ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-muted-foreground")}>{active ? <Check className="size-3.5" /> : item.number}</span>
+          <span className="grid min-w-0 gap-0.5">
+            <span className={cn("flex items-center gap-1.5 text-sm font-semibold", active ? "text-foreground" : "text-foreground/75")}>{item.icon}{item.label}</span>
+            <span className="truncate text-[11px] text-muted-foreground">{item.note}</span>
+          </span>
+        </button>;
+      })}
+    </div>
+  </nav>;
 }
 
 function ControlSection({ title, eyebrow, children }: { title: string; eyebrow: string; children: ReactNode }) {
@@ -381,7 +415,7 @@ function ModelSelect({ disabled, model, onChange }: { disabled: boolean; model: 
   return <div className="grid gap-2">
     <Label htmlFor="speech-model" className="text-xs text-muted-foreground">本地语音模型</Label>
     <Select disabled={disabled} onValueChange={(value) => onChange(value as SpeechModel)} value={model}>
-      <SelectTrigger id="speech-model" className="h-9"><SelectValue placeholder="选择模型" /></SelectTrigger>
+      <SelectTrigger id="speech-model" className="h-9 w-full min-w-0"><SelectValue placeholder="选择模型" /></SelectTrigger>
       <SelectContent>{speechModels.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.note}</SelectItem>)}</SelectContent>
     </Select>
   </div>;
@@ -392,7 +426,7 @@ function DownloadSourceSelect({ disabled, source, onChange }: { disabled: boolea
   return <div className="grid gap-2">
     <Label htmlFor="download-source" className="text-xs text-muted-foreground">下载来源</Label>
     <Select disabled={disabled} onValueChange={(value) => onChange(value as DownloadSource)} value={source}>
-      <SelectTrigger id="download-source" className="h-9"><SelectValue placeholder="选择下载来源" /></SelectTrigger>
+      <SelectTrigger id="download-source" className="h-9 w-full min-w-0"><SelectValue placeholder="选择下载来源" /></SelectTrigger>
       <SelectContent>{downloadSources.map((item) => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}</SelectContent>
     </Select>
     <p className="text-[11px] leading-relaxed text-muted-foreground">{selected?.note}</p>
@@ -451,7 +485,7 @@ function CharacterControls({ busy, characterAsset, characterName, downloadSource
   </CardContent>;
 }
 
-function SynthesizeControls({ busy, characters, setSynthesisCharacterId, setSynthesisText, setStyle, style, synthesisCharacterId, synthesisText, ttsReady, onRun, onInstall }: { busy: string | null; characters: VoiceCharacter[]; setSynthesisCharacterId: (value: string) => void; setSynthesisText: (value: string) => void; setStyle: (value: VoiceStyle) => void; style: VoiceStyle; synthesisCharacterId: string; synthesisText: string; ttsReady: boolean; onRun: () => void; onInstall: () => void }) {
+function SynthesizeControls({ busy, characters, downloadSource, setDownloadSource, setSynthesisCharacterId, setSynthesisText, setStyle, style, synthesisCharacterId, synthesisText, ttsReady, onRun, onInstall }: { busy: string | null; characters: VoiceCharacter[]; downloadSource: DownloadSource; setDownloadSource: (value: DownloadSource) => void; setSynthesisCharacterId: (value: string) => void; setSynthesisText: (value: string) => void; setStyle: (value: VoiceStyle) => void; style: VoiceStyle; synthesisCharacterId: string; synthesisText: string; ttsReady: boolean; onRun: () => void; onInstall: () => void }) {
   return <CardContent className="flex flex-col gap-6">
     <ControlSection eyebrow="文本" title="要朗读的内容">
       <Textarea aria-label="要朗读的文本" disabled={busy !== null} onChange={(event) => setSynthesisText(event.target.value)} placeholder="例如：欢迎来到我的频道，今天我们学习 AI。" rows={5} value={synthesisText} />
@@ -464,7 +498,11 @@ function SynthesizeControls({ busy, characters, setSynthesisCharacterId, setSynt
     <ControlSection eyebrow="风格" title="情绪指令">
       <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/50 p-1">{styles.map((item) => <Button className={cn(style === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setStyle(item.id)} title={item.note} type="button" variant="ghost" size="sm">{item.label}</Button>)}</div>
     </ControlSection>
-    {ttsReady ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />CosyVoice2 已就绪</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载 CosyVoice2 权重</Button>}
+    <Separator />
+    {ttsReady ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />CosyVoice2 已就绪</p> : <ControlSection eyebrow="模型" title="CosyVoice2 权重">
+      <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
+      <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载 CosyVoice2 权重</Button>
+    </ControlSection>}
     <Button disabled={busy !== null || !synthesisCharacterId || !synthesisText.trim() || !ttsReady} onClick={onRun} type="button" size="lg">{busy === "synthesize" ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}合成配音</Button>
   </CardContent>;
 }
@@ -477,7 +515,7 @@ function SelectedSource({ asset }: { asset: MediaAsset }) {
   </figure>;
 }
 
-function Setup({ autoPrepare, busy, elapsedSeconds, failure, failureLogs, logs, message, onPrepare, onAskAgent }: { autoPrepare: boolean; busy: string | null; elapsedSeconds: number; failure: string; failureLogs: ShellJobLog[]; logs: ShellJobLog[]; message: string; onPrepare: () => void; onAskAgent: () => void }) {
+function Setup({ autoPrepare, busy, elapsedSeconds, failure, failureLogs, logs, message, pythonVersion, onPrepare, onAskAgent }: { autoPrepare: boolean; busy: string | null; elapsedSeconds: number; failure: string; failureLogs: ShellJobLog[]; logs: ShellJobLog[]; message: string; pythonVersion?: string; onPrepare: () => void; onAskAgent: () => void }) {
   const started = useRef(false);
   useEffect(() => { if (autoPrepare && !started.current) { started.current = true; onPrepare(); } }, [autoPrepare, onPrepare]);
   const failureText = failureLogs.length ? failureLogs.map((entry) => entry.text).join("") : "";
@@ -491,7 +529,7 @@ function Setup({ autoPrepare, busy, elapsedSeconds, failure, failureLogs, logs, 
       </CardHeader>
       <CardContent className="grid gap-3">
         {busy === "prepare" && <><div className="flex items-center gap-1.5 font-mono text-[11px] font-semibold text-primary"><Clock3 className="size-3.5" />任务运行中 · {formatElapsed(elapsedSeconds)}</div><pre className="max-h-56 overflow-auto rounded-md bg-terminal p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg" aria-label="准备过程">{logs.length ? logText(logs) : "正在启动本地运行环境…"}</pre></>}
-        {failure && <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"><strong>运行环境准备失败</strong><p className="break-all text-destructive">{failure}</p>{failureText && <pre className="max-h-56 overflow-auto rounded-md bg-terminal p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg" aria-label="失败日志">{failureText}</pre>}<Button disabled={busy !== null} onClick={onAskAgent} type="button" variant="outline" size="sm" className="w-fit text-destructive"><Send className="size-3.5" />交给右侧 Codex 处理</Button></div>}
+        {failure && <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"><strong className="text-sm">运行环境准备失败</strong><p className="break-all leading-relaxed text-destructive">{failure}</p>{pythonVersion && <p className="text-[11px] text-muted-foreground">当前 venv 使用 Python {pythonVersion}；若日志显示无法找到依赖版本，通常是当前 Python 没有对应 wheel，可切换 Python 版本或重试。</p>}{failureText && <pre className="max-h-56 overflow-auto rounded-md bg-terminal p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg" aria-label="失败日志">{failureText}</pre>}<div className="flex gap-2"><Button disabled={busy !== null} onClick={onAskAgent} type="button" variant="outline" size="sm" className="w-fit text-destructive"><Send className="size-3.5" />交给右侧 Codex 处理</Button></div></div>}
       </CardContent>
       <CardFooter className="flex-col items-start gap-2">
         <Button disabled={busy !== null} onClick={onPrepare} type="button" variant="outline">{busy === "prepare" ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}{busy === "prepare" ? "正在启动…" : "重新尝试"}</Button>
@@ -501,7 +539,7 @@ function Setup({ autoPrepare, busy, elapsedSeconds, failure, failureLogs, logs, 
   </div>;
 }
 
-function TranscriptOutput({ transcript, onEditSegment }: { transcript: TranscriptDetail | null; onEditSegment: (index: number, text: string) => void }) {
+function TranscriptOutput({ busy, transcript, onEditSegment, onSave }: { busy: string | null; transcript: TranscriptDetail | null; onEditSegment: (index: number, text: string) => void; onSave: (transcript: TranscriptDetail) => void }) {
   const [showSRT, setShowSRT] = useState(false);
   const [copied, setCopied] = useState(false);
   const srt = transcript ? buildSRT(transcript.segments) : "";
@@ -513,10 +551,12 @@ function TranscriptOutput({ transcript, onEditSegment }: { transcript: Transcrip
     </div>
     <div className="grid flex-1 place-items-center">
       {transcript ? <div className="grid w-full max-w-2xl gap-3">
-        <div className="flex flex-wrap items-center gap-1.5"><Badge variant="secondary">{transcript.sourceKind === "video" ? "视频" : "音频"} · {speechModels.find((item) => item.id === transcript.model)?.label ?? transcript.model}</Badge><Badge variant="secondary">{transcript.language === "auto" ? "自动检测" : transcript.language === "zh" ? "中文" : "英文"}</Badge><Badge variant="secondary">{transcript.duration.toFixed(1)} 秒</Badge><Badge variant="secondary">{transcript.segments.length} 段</Badge></div>
+        <div className="flex flex-wrap items-center gap-1.5"><Badge variant="secondary">{transcript.sourceKind === "video" ? "视频" : "音频"} · {speechModels.find((item) => item.id === transcript.model)?.label ?? transcript.model}</Badge><Badge variant="secondary">{transcript.language === "auto" ? "自动检测" : transcript.language === "zh" ? "中文" : "英文"}</Badge><Badge variant="secondary">{transcript.duration.toFixed(1)} 秒</Badge><Badge variant="secondary">{transcript.segments.length} 段</Badge>{transcript.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div>
+        {transcript.audioURL && <audio className="w-full" controls preload="metadata" src={transcript.audioURL} aria-label="转写源声音" />}
         <div className="max-h-[340px] overflow-auto rounded-md border">{transcript.segments.map((segment, index) => <div className="grid grid-cols-[132px_minmax(0,1fr)] items-center gap-3 border-b px-3 py-1.5 last:border-0" key={`${transcript.id}-${index}`}><span className="font-mono text-[11px] whitespace-nowrap text-muted-foreground">{formatTimecode(segment.start).replace(",", " ").slice(0, 8)} → {formatTimecode(segment.end).replace(",", " ").slice(0, 8)}</span><Input aria-label={`第 ${index + 1} 段文本`} className="h-8 border-transparent bg-transparent shadow-none hover:border-border focus-visible:bg-background" onChange={(event) => onEditSegment(index, event.target.value)} value={segment.text} /></div>)}</div>
         <div className="flex items-center justify-between gap-3"><Button onClick={() => setShowSRT((visible) => !visible)} type="button" variant="ghost" size="sm" className="w-fit px-0 text-primary hover:bg-transparent hover:text-primary"><FileAudio className="size-3.5" />{showSRT ? "收起 SRT" : "预览 SRT"}</Button><p className="text-[11px] text-muted-foreground">文本可编辑，复制或下载会使用编辑后的内容。</p></div>
         {showSRT && <pre className="max-h-52 overflow-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{srt}</pre>}
+        <div className="flex items-center justify-between gap-3 border-t pt-3"><p className="text-xs text-muted-foreground">确认无误后保存为素材库的转写素材（含源声音、SRT 与 JSON）。</p>{transcript.savedAssetId ? <Badge variant="secondary">素材库已保存</Badge> : <Button disabled={busy !== null} onClick={() => onSave(transcript)} type="button" size="sm">{busy === "save" ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}保存到素材库</Button>}</div>
       </div> : <div className="grid max-w-60 place-items-center gap-2 text-center text-sm text-muted-foreground"><MessageSquareText className="size-7 text-muted-foreground/60" /><p>选择素材并转写后，文稿与字幕会显示在这里。</p></div>}
     </div>
   </CardContent>;
@@ -545,13 +585,13 @@ function SynthesisOutput({ busy, selected, syntheses, onSave }: { busy: string |
 function BottomPanel({ activeTab, cancelling, elapsedSeconds, logs, onCancel, onTabChange, running, tab, transcripts, characters, syntheses }: { activeTab: "history" | "logs"; cancelling: boolean; elapsedSeconds: number; logs: ShellJobLog[]; onCancel: () => void; onTabChange: (tab: "history" | "logs") => void; running: boolean; tab: Tab; transcripts: TranscriptSummary[]; characters: VoiceCharacter[]; syntheses: Synthesis[] }) {
   const historyCount = tab === "transcribe" ? transcripts.length : tab === "characters" ? characters.length : syntheses.length;
   return <Card className="mt-4 rounded-lg shadow-none">
-    <div className="flex items-center gap-1 border-b bg-muted/30 px-2 pt-1.5" role="tablist" aria-label="输出记录">
-      <Button aria-controls="audio-history" aria-selected={activeTab === "history"} className={cn("rounded-b-none border-b-2 border-transparent hover:bg-transparent", activeTab === "history" && "border-primary text-foreground hover:text-foreground")} id="audio-history-tab" onClick={() => onTabChange("history")} role="tab" type="button" variant="ghost" size="sm">历史 <Badge variant="secondary" className="ml-1">{historyCount}</Badge></Button>
-      <Button aria-controls="audio-logs" aria-selected={activeTab === "logs"} className={cn("rounded-b-none border-b-2 border-transparent hover:bg-transparent", activeTab === "logs" && "border-primary text-foreground hover:text-foreground")} id="audio-logs-tab" onClick={() => onTabChange("logs")} role="tab" type="button" variant="ghost" size="sm">执行日志 <Badge variant="secondary" className="ml-1">{logs.length}</Badge></Button>
+    <div className="flex items-center gap-1 border-b bg-muted/30 px-3 py-2" role="tablist" aria-label="输出记录">
+      <Button aria-controls="audio-history" aria-selected={activeTab === "history"} className={cn("h-8 rounded-md px-3 text-muted-foreground hover:bg-background hover:text-foreground", activeTab === "history" && "bg-background text-foreground shadow-sm ring-1 ring-foreground/10 hover:bg-background")} id="audio-history-tab" onClick={() => onTabChange("history")} role="tab" type="button" variant="ghost" size="sm">历史 <Badge variant="secondary" className="ml-1">{historyCount}</Badge></Button>
+      <Button aria-controls="audio-logs" aria-selected={activeTab === "logs"} className={cn("h-8 rounded-md px-3 text-muted-foreground hover:bg-background hover:text-foreground", activeTab === "logs" && "bg-background text-foreground shadow-sm ring-1 ring-foreground/10 hover:bg-background")} id="audio-logs-tab" onClick={() => onTabChange("logs")} role="tab" type="button" variant="ghost" size="sm">执行日志 <Badge variant="secondary" className="ml-1">{logs.length}</Badge></Button>
       {running && <Button className="ml-auto text-destructive hover:text-destructive" disabled={cancelling} onClick={onCancel} type="button" variant="ghost" size="sm"><CircleStop className="size-3.5" />{cancelling ? "正在停止" : "停止任务"}</Button>}
     </div>
     <div className="min-h-40">
-      {activeTab === "history" ? <div aria-labelledby="audio-history-tab" id="audio-history" role="tabpanel"><History tab={tab} transcripts={transcripts} characters={characters} syntheses={syntheses} /></div> : <div aria-labelledby="audio-logs-tab" id="audio-logs" role="tabpanel">{running && <p className="flex items-center gap-1.5 px-4 pt-3 font-mono text-[11px] font-semibold text-primary"><Clock3 className="size-3.5" />任务运行中 · {formatElapsed(elapsedSeconds)}</p>}<pre className="max-h-56 overflow-auto p-4 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg">{logs.length ? logText(logs) : "正在等待任务输出…"}</pre></div>}
+      {activeTab === "history" ? <div aria-labelledby="audio-history-tab" id="audio-history" role="tabpanel"><History tab={tab} transcripts={transcripts} characters={characters} syntheses={syntheses} /></div> : <div aria-labelledby="audio-logs-tab" className="min-h-40 bg-terminal text-terminal-fg" id="audio-logs" role="tabpanel">{running && <p className="flex items-center gap-1.5 border-b border-white/10 px-4 py-3 font-mono text-[11px] font-semibold text-primary"><Clock3 className="size-3.5" />任务运行中 · {formatElapsed(elapsedSeconds)}</p>}<pre className="max-h-56 overflow-auto p-4 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{logs.length ? logText(logs) : "正在等待任务输出…"}</pre></div>}
     </div>
   </Card>;
 }

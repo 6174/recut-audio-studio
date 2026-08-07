@@ -1,6 +1,6 @@
 /*
  * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务
- * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、声音角色创建、配音合成、历史与用户确认入库 operation
+ * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、声音角色创建、配音合成、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材
  * [POS]: audio-studio 的唯一业务后端；输出先停留在 App 文件沙箱，绝不在生成时自动创建素材库 Asset
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
@@ -26,11 +26,20 @@ function value(input, name) { return String(input[name] || "").trim(); }
 function outputID() { return `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 
 function ensureSchema(ctx) {
-  ctx.sqlite.execute("create table if not exists audio_transcripts (id text primary key, source_asset_id text not null, source_kind text not null, model text not null, language text not null, srt_path text not null, json_path text not null, duration real not null default 0, created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
+  ctx.sqlite.execute("create table if not exists audio_transcripts (id text primary key, source_asset_id text not null, source_kind text not null, model text not null, language text not null, srt_path text not null, json_path text not null, audio_path text not null default '', saved_asset_id text not null default '', duration real not null default 0, created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
   ctx.sqlite.execute("create table if not exists audio_characters (id text primary key, name text not null, model text not null, sample_path text not null, sample_asset_id text not null default '', prompt_text text not null default '', created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
   ctx.sqlite.execute("create table if not exists audio_syntheses (id text primary key, character_id text not null, text text not null, style text not null default 'neutral', output_path text not null, mime_type text not null, saved_asset_id text not null default '', created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
   ctx.sqlite.execute("create table if not exists audio_jobs (job_id text primary key, action text not null, record_id text not null default '', started_at text not null, resolved_at text not null default '')");
   ctx.sqlite.execute("create table if not exists audio_settings (key text primary key, value text not null)");
+  ctx.sqlite.execute("create table if not exists audio_env_error (id integer primary key check (id = 1), job_id text not null, action text not null, error text not null, logs text not null, updated_at text not null)");
+  ensureColumn(ctx, "audio_transcripts", "audio_path", "text not null default ''");
+  ensureColumn(ctx, "audio_transcripts", "saved_asset_id", "text not null default ''");
+}
+
+function ensureColumn(ctx, table, column, definition) {
+  const columns = ctx.sqlite.query(`pragma table_info(${table})`);
+  if (columns.some((row) => String(row.name) === column)) return;
+  ctx.sqlite.execute(`alter table ${table} add column ${column} ${definition}`);
 }
 
 function downloadSource(ctx) {
@@ -73,7 +82,9 @@ function settleOutput(ctx, action, recordID, job) {
 
 function resolveTrackedJob(ctx, record, job) {
   settleOutput(ctx, record.action, record.record_id, job);
-  return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: job.status, error: job.error || "", logs: ctx.shell.logs(record.job_id).slice(-80) };
+  const logs = ctx.shell.logs(record.job_id).slice(-80);
+  noteEnvOutcome(ctx, record, job, logs);
+  return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: job.status, error: job.error || "", logs };
 }
 
 function trackedJob(ctx) {
@@ -91,12 +102,14 @@ function trackedJob(ctx) {
     const message = error instanceof Error ? error.message : "shell job is unavailable";
     const interrupted = { status: "interrupted", error: `任务记录不可恢复：${message}` };
     settleOutput(ctx, record.action, record.record_id, interrupted);
+    noteEnvOutcome(ctx, record, interrupted, []);
     return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
   }
   const status = shellJobStatus(job);
   if (!isActiveJob(status) && !isTerminalJob(status)) {
     const interrupted = { status: "interrupted", error: `任务状态不可识别：${status || "empty"}` };
     settleOutput(ctx, record.action, record.record_id, interrupted);
+    noteEnvOutcome(ctx, record, interrupted, []);
     return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
   }
   return resolveTrackedJob(ctx, record, { status, error: shellJobError(job) });
@@ -116,6 +129,7 @@ function trackJob(ctx, job, action, recordID = "") {
   const now = new Date().toISOString();
   ctx.sqlite.execute("update audio_jobs set resolved_at = ? where resolved_at = ''", [now]);
   ctx.sqlite.execute("insert into audio_jobs (job_id, action, record_id, started_at, resolved_at) values (?, ?, ?, ?, '')", [id, action, recordID, now]);
+  if (action === "prepare" || action === "install") clearEnvError(ctx);
   return job;
 }
 
@@ -125,22 +139,66 @@ function markFailed(ctx, action, recordID, error) {
   ctx.sqlite.execute(`update ${table} set status = 'failed', error = ? where id = ?`, [error instanceof Error ? error.message : String(error), recordID]);
 }
 
+function meaningfulError(logs, fallback) {
+  const lines = (logs || []).map((entry) => String(entry.text || "")).map((line) => line.trim()).filter(Boolean);
+  return lines[lines.length - 1] || fallback || "未知错误";
+}
+
+function envErrorRow(ctx) {
+  ensureSchema(ctx);
+  const rows = ctx.sqlite.query("select job_id, action, error, logs, updated_at from audio_env_error where id = 1");
+  return rows.length ? rows[0] : null;
+}
+
+function storeEnvError(ctx, action, jobID, error, logs) {
+  ctx.sqlite.execute("insert into audio_env_error (id, job_id, action, error, logs, updated_at) values (1, ?, ?, ?, ?, ?) on conflict(id) do update set job_id = excluded.job_id, action = excluded.action, error = excluded.error, logs = excluded.logs, updated_at = excluded.updated_at", [jobID || "", action, error, JSON.stringify(logs), new Date().toISOString()]);
+}
+
+function clearEnvError(ctx) {
+  ctx.sqlite.execute("delete from audio_env_error where id = 1");
+}
+
+// Persist prepare/install outcomes so the real error and its log tail remain
+// visible in audio.status even after the shell job is resolved (the platform
+// only records a generic "exit status 1" on the job itself).
+function noteEnvOutcome(ctx, record, job, logs = []) {
+  if (record.action !== "prepare" && record.action !== "install") return;
+  if (!isTerminalJob(job.status)) return;
+  if (job.status === "completed") { clearEnvError(ctx); return; }
+  const tail = (logs || []).slice(-40);
+  storeEnvError(ctx, record.action, record.job_id, meaningfulError(tail, job.error), tail);
+}
+
 function status(_, ctx) {
   const activeJob = trackedJob(ctx);
   const environment = ctx.python.status();
-  if (!environment.ready) return { ready: false, pending: true, modelsRoot: "~/.recut/models/audio-studio", error: environment.error || "Python 运行环境尚未就绪。", asr: { installed: [] }, tts: { ready: false }, downloadSource: downloadSource(ctx), activeJob };
+  const envError = envErrorRow(ctx);
+  let envFailure = null;
+  if (envError && envError.error) {
+    let storedLogs = [];
+    try { storedLogs = JSON.parse(envError.logs || "[]"); } catch (_) { /* keep empty */ }
+    envFailure = { setupError: envError.error, setupLogs: storedLogs };
+  }
+  if (!environment.ready) {
+    return {
+      ready: false, pending: true, modelsRoot: "~/.recut/models/audio-studio",
+      error: envFailure ? `运行环境准备失败：${envFailure.setupError}` : environment.error || "Python 运行环境尚未就绪。",
+      asr: { installed: [] }, tts: { ready: false }, downloadSource: downloadSource(ctx), activeJob,
+      ...(envFailure || {}),
+    };
+  }
   const runner = run(ctx, ["status"], 20);
   const result = { ...runner, downloadSource: downloadSource(ctx), activeJob };
-  if (activeJob && isTerminalJob(activeJob.status) && activeJob.status !== "completed" && (activeJob.action === "prepare" || activeJob.action === "install")) {
-    const logs = (activeJob.logs || []).slice(-30);
-    const lastLine = [...logs].reverse().map((entry) => entry.text.trim()).find(Boolean);
+  if (!runner.ready) {
     result.ready = false;
-    result.setupError = lastLine || activeJob.error || "未知错误";
-    result.error = `运行环境准备失败：${result.setupError}`;
-    result.setupLogs = logs;
-  } else if (!runner.ready) {
-    result.setupError = runner.error || "运行环境检查未通过。";
-    result.setupLogs = [];
+    if (envFailure) {
+      result.setupError = envFailure.setupError;
+      result.setupLogs = envFailure.setupLogs;
+      result.error = `运行环境准备失败：${envFailure.setupError}`;
+    } else {
+      result.setupError = runner.error || "运行环境检查未通过。";
+      result.setupLogs = [];
+    }
   }
   return result;
 }
@@ -171,8 +229,8 @@ function transcribe(input, ctx) {
   if (source.kind !== kind) throw new Error(`Selected Asset is ${source.kind}, not ${kind}.`);
   const id = outputID();
   const stem = `transcripts/${id}`;
-  const record = { id, sourceAssetId: assetID, sourceKind: kind, model, language, srtPath: `${stem}.srt`, jsonPath: `${stem}.json`, duration: 0, createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
-  ctx.sqlite.execute("insert into audio_transcripts (id, source_asset_id, source_kind, model, language, srt_path, json_path, duration, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.sourceAssetId, record.sourceKind, record.model, record.language, record.srtPath, record.jsonPath, record.duration, record.createdAt, record.jobId, record.status, record.error]);
+  const record = { id, sourceAssetId: assetID, sourceKind: kind, model, language, srtPath: `${stem}.srt`, jsonPath: `${stem}.json`, audioPath: `${stem}.audio.wav`, savedAssetId: "", duration: 0, createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
+  ctx.sqlite.execute("insert into audio_transcripts (id, source_asset_id, source_kind, model, language, srt_path, json_path, audio_path, saved_asset_id, duration, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.sourceAssetId, record.sourceKind, record.model, record.language, record.srtPath, record.jsonPath, record.audioPath, record.savedAssetId, record.duration, record.createdAt, record.jobId, record.status, record.error]);
   try {
     const job = ctx.python.run(["python/audio_runner.py", "transcribe", "--model", model, "--language", language, "--input", source.path, "--output", stem]);
     const tracked = trackJob(ctx, job, "transcribe", id);
@@ -191,10 +249,11 @@ function readJSON(ctx, path) {
 }
 
 function transcriptRecord(ctx, row) {
-  const record = { id: row.id, sourceAssetId: row.source_asset_id, sourceKind: row.source_kind, model: row.model, language: row.language, duration: row.duration, createdAt: row.created_at, srtURL: "", jsonURL: "" };
+  const record = { id: row.id, sourceAssetId: row.source_asset_id, sourceKind: row.source_kind, model: row.model, language: row.language, duration: row.duration, createdAt: row.created_at, savedAssetId: row.saved_asset_id || "", srtURL: "", jsonURL: "", audioURL: "" };
   try {
     record.srtURL = ctx.files.url(row.srt_path);
     record.jsonURL = ctx.files.url(row.json_path);
+    if (row.audio_path) record.audioURL = ctx.files.url(row.audio_path);
   } catch (error) {
     ctx.sqlite.execute("update audio_transcripts set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : "转写文件已丢失。", row.id]);
     return null;
@@ -205,14 +264,14 @@ function transcriptRecord(ctx, row) {
 function transcripts(_, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
-  return ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, duration, created_at from audio_transcripts where status = 'completed' order by created_at desc").map((row) => transcriptRecord(ctx, row)).filter(Boolean);
+  return ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, duration, created_at, srt_path, json_path, audio_path, saved_asset_id from audio_transcripts where status = 'completed' order by created_at desc").map((row) => transcriptRecord(ctx, row)).filter(Boolean);
 }
 
 function transcript(input, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
   const id = value(input, "id");
-  const rows = ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, duration, created_at, srt_path, json_path, status, error from audio_transcripts where id = ?", [id]);
+  const rows = ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, duration, created_at, srt_path, json_path, audio_path, saved_asset_id, status, error from audio_transcripts where id = ?", [id]);
   if (!rows.length) throw new Error("Audio transcript was not found.");
   const row = rows[0];
   if (row.status !== "completed") return { id: row.id, status: row.status, error: row.error || "" };
@@ -354,6 +413,28 @@ function save(input, ctx) {
   ensureSchema(ctx);
   const id = value(input, "id");
   const kind = value(input, "kind");
+  if (kind === "transcript") {
+    const rows = ctx.sqlite.query("select id, source_asset_id, srt_path, json_path, audio_path, model, language, duration, saved_asset_id from audio_transcripts where id = ? and status = 'completed'", [id]);
+    if (!rows.length) throw new Error("Audio transcript was not found.");
+    const record = rows[0];
+    if (!record.audio_path) throw new Error("该转写没有保留源声音轨，无法保存为转写素材，请重新转写。");
+    if (!record.saved_asset_id) {
+      const asset = ctx.media.importTranscript({
+        name: `transcript-${record.id}.wav`,
+        sourceAssetId: record.source_asset_id,
+        audioPath: record.audio_path,
+        srtPath: record.srt_path,
+        jsonPath: record.json_path,
+        mimeType: "audio/wav",
+        model: record.model,
+        language: record.language,
+        duration: record.duration,
+      });
+      ctx.sqlite.execute("update audio_transcripts set saved_asset_id = ? where id = ?", [asset.id, id]);
+      record.saved_asset_id = asset.id;
+    }
+    return { id, kind, assetId: record.saved_asset_id };
+  }
   if (kind === "synthesis") {
     const rows = ctx.sqlite.query("select id, output_path, mime_type, saved_asset_id from audio_syntheses where id = ? and status = 'completed'", [id]);
     if (!rows.length) throw new Error("Audio synthesis was not found.");
@@ -376,7 +457,7 @@ function save(input, ctx) {
     }
     return { id, kind, assetId: record.sample_asset_id };
   }
-  throw new Error("kind must be synthesis or character");
+  throw new Error("kind must be transcript, synthesis or character");
 }
 
 function job(_, ctx) {
