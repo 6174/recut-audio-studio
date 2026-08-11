@@ -43,7 +43,7 @@ ui/ -> background.js -> ctx.python / ctx.shell -> ShellJobManager -> python/audi
 用户点击保存 -> ctx.media.importFile -> 素材库 Asset
 ```
 
-`background.js` 是唯一业务入口。它把模型下载源持久化在 App SQLite，把素材库输入 materialize 到私有目录、提交 Python Job、保存转写 / 角色 / 合成记录，并在 App SQLite 保留一个活动任务及其持久化日志；界面重连后通过 `audio.job` 恢复，任务可以由 `audio.cancel` 停止，只有处理完终态才以 `audio.resolve` 清除。记录以任务终态驱动：只有成功生成且可预览的文件进入历史。转写文稿以 `segments: [{ start, end, text, speaker, emotion }]` 结构保存，SRT 只是导出展示格式；声音角色由 `sample.wav` 与自动生成的 `promptText` 组成，配音据此零样本合成。它绝不在生成成功时导入素材库。`python/audio_runner.py` 不管理 venv、pip 或官方仓库，不了解 App SQLite 或素材库，只负责模型状态、下载、转写与合成。
+`background.js` 是唯一业务入口。它把模型下载源持久化在 App SQLite，把素材库输入 materialize 到私有目录、提交 Python Job、保存转写 / 角色 / 合成记录，并在 App SQLite 保留一个活动任务及其持久化日志；界面重连后通过 `audio.job` 恢复，任务可以由 `audio.cancel` 停止，只有处理完终态才以 `audio.resolve` 清除。同步状态检查与异步推理都显式使用平台注入的 `RECUT_PYTHON`，因此必定运行在 manifest 对应的隔离 venv，而不会误用宿主 `python3`。记录以任务终态驱动：只有成功生成且可预览的文件进入历史。转写文稿以 `segments: [{ start, end, text, speaker, emotion }]` 结构保存，SRT 只是导出展示格式；声音角色由 `sample.wav` 与自动生成的 `promptText` 组成，配音据此零样本合成。它绝不在生成成功时导入素材库。`python/audio_runner.py` 不管理 venv、pip 或官方仓库，不了解 App SQLite 或素材库，只负责模型状态、下载、转写与合成。
 
 ## 开发
 

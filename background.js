@@ -63,7 +63,12 @@ function parseProcess(result) {
 }
 
 function run(ctx, args, timeoutSeconds) {
-  return parseProcess(ctx.shell.exec({ command: "python3", args: ["python/audio_runner.py", ...args], environment: "audio-studio", timeoutSeconds }));
+  // ------------------------------
+  // Shell 会在注入 PATH 前解析命令；必须显式使用平台给出的 venv Python。
+  // 同步状态检查与异步推理由此共享同一套 qwen-asr 依赖。
+  // ------------------------------
+  const shell = '"$RECUT_PYTHON" python/audio_runner.py "$@"';
+  return parseProcess(ctx.shell.exec({ command: "sh", args: ["-eu", "-c", shell, "audio-runner", ...args], environment: "audio-studio", timeoutSeconds }));
 }
 
 function shellJobID(job) { return String(job.id || job.ID || "").trim(); }

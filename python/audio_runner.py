@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -168,6 +169,11 @@ def downloaded_model(path: Path) -> bool:
     return (path / "config.json").is_file() and any(path.glob("*.safetensors"))
 
 
+def qwen_runtime_available() -> bool:
+    """A downloaded Qwen checkpoint is usable only with the official runtime package."""
+    return importlib.util.find_spec("qwen_asr") is not None
+
+
 def cosyvoice_repo() -> Path:
     return model_root() / COSYVOICE_REPOSITORY
 
@@ -183,7 +189,12 @@ def state(root: Path) -> dict:
     whisper = whisper_dir()
     installed = [name for name in WHISPER_MODELS if downloaded_whisper(name)]
     aligner_ready = downloaded_model(qwen_aligner())
-    installed.extend(name for name in QWEN_MODELS if downloaded_model(qwen_model(name)) and aligner_ready)
+    qwen_installed = [name for name in QWEN_MODELS if downloaded_model(qwen_model(name)) and aligner_ready]
+    qwen_runtime_ready = qwen_runtime_available()
+    if qwen_installed and not qwen_runtime_ready:
+        problems.append("Qwen3-ASR 运行依赖缺失，请重新准备声音工坊运行环境。")
+    elif qwen_runtime_ready:
+        installed.extend(qwen_installed)
     repository_ready = (cosyvoice_repo() / "cosyvoice" / "cli" / "cosyvoice.py").is_file() and (cosyvoice_repo() / "third_party" / "Matcha-TTS" / "matcha").is_dir()
     model_ready = (cosyvoice_model() / "cosyvoice2.yaml").is_file()
     if not repository_ready:
@@ -192,7 +203,7 @@ def state(root: Path) -> dict:
         "ready": not problems,
         "modelsRoot": str(root),
         "pythonVersion": f"{sys.version_info.major}.{sys.version_info.minor}",
-        "asr": {"installed": installed},
+        "asr": {"installed": installed, "qwenRuntime": qwen_runtime_ready},
         "tts": {"repository": repository_ready, "model": model_ready, "ready": repository_ready and model_ready},
         "error": " ".join(problems),
     }
