@@ -4,7 +4,7 @@
 
 成员清单
 audio_runner.py: 本机 Python 执行入口；检查 FFmpeg 与模型状态，按 Hugging Face、ModelScope 或自动回退下载 Whisper / Qwen3-ASR / CosyVoice2 权重，Qwen 同时安装官方时间戳对齐器；抽取音频轨道并转写为 transcript.json 文稿与 SRT 字幕、把参考音归一化为 16k 单声道 wav 并自动生成角色提示词、用 CosyVoice2 零样本或情绪指令合成配音 wav，各阶段输出实时进度；不管理 venv 或依赖安装。
-requirements.lock: 平台 Python runtime 的依赖清单；包含 Qwen 官方 qwen-asr、ModelScope 与 transformers，其内容参与 venv 指纹，变更会得到新的隔离环境；Qwen 权重只有在 qwen-asr 运行时也存在时才会被报告为可用。
+requirements.lock: 平台 Python runtime 的依赖清单；包含 Qwen 官方 qwen-asr、ModelScope 与 transformers，其内容参与 venv 指纹，变更会得到新的隔离环境；FFmpeg 由 manifest 的 `tools` 声明交给平台准备，Qwen 权重只有在 qwen-asr 运行时也存在时才会被报告为可用。
 
 依赖关系
 

@@ -361,10 +361,10 @@ function App() {
 
   return <div className="mx-auto max-w-[1440px] p-6">
     <header className="flex flex-col gap-1 border-b pb-5">
-      <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">Recut App / Audio Intelligence</p>
+      <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">Recut App / 声音工坊</p>
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">声音工坊</h1>
-        <Badge variant="secondary" className="font-mono">Standalone App</Badge>
+        <Badge variant="secondary" className="font-mono">工作区 App</Badge>
       </div>
       <p className="text-sm text-muted-foreground">转写、声音角色与角色配音。声音是视频的一级资源，输出先留在私有区，确认后再进素材库。</p>
     </header>

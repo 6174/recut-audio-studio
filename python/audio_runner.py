@@ -12,6 +12,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -217,10 +218,13 @@ def extract_audio(source: Path, target: Path) -> None:
 
 
 def probe_duration(path: Path) -> float:
-    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)], capture_output=True, text=True)
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path)], capture_output=True, text=True)
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", f"{result.stdout}\n{result.stderr}")
+    if not match:
+        return 0.0
     try:
-        data = json.loads(result.stdout or "{}")
-        return float(data.get("format", {}).get("duration") or 0)
+        hours, minutes, seconds = match.groups()
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
     except ValueError:
         return 0.0
 

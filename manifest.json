@@ -14,8 +14,9 @@
     "python": {
       "venv": "audio-studio",
       "version": "3.11",
+      "tools": ["ffmpeg"],
       "requirements": "python/requirements.lock",
-      "bootstrap": "bootstrap.sh"
+      "bootstrap": "bootstrap.py"
     }
   },
   "operations": [

@@ -7,8 +7,8 @@
 # Versions are intentionally unpinned so the platform's python3 (macOS may be
 # 3.11, 3.12, 3.13 or 3.14) resolves wheels compatible with itself; this mirrors
 # depth-anything. ASR via faster-whisper; TTS via CosyVoice2 whose flow/hifigan
-# use the matcha modules vendored as the CosyVoice third_party/Matcha-TTS git
-# submodule (cloned by bootstrap.sh, never pip-installed). openai-whisper and
+# use the Matcha-TTS modules prepared by bootstrap.py under CosyVoice's
+# third_party directory (never pip-installed). openai-whisper and
 # modelscope are intentionally absent: the runner injects a whisper shim
 # (log_mel_spectrogram + whisper.tokenizer.Tokenizer over vendored mel filters)
 # and a modelscope shim (snapshot_download), so nothing builds from source.

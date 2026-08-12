@@ -10,7 +10,7 @@
 
 ## 使用流程
 
-1. 在 **Apps** 中从 [recut-audio-studio](https://github.com/6174/recut-audio-studio) 安装并打开“声音工坊”。首次进入会检查 Python、FFmpeg 与模型，并由平台异步创建 manifest 声明的 venv、安装锁定依赖与执行 App bootstrap（浅克隆 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice)）。
+1. 在 **Apps** 中从 [recut-audio-studio](https://github.com/6174/recut-audio-studio) 安装并打开“声音工坊”。首次进入会自动准备 Python、FFmpeg 与模型：平台优先使用 manifest 指定的 **Python 3.11**，缺少时把受管版本安装到 Recut 数据目录；FFmpeg 同样在隔离环境中自动提供。随后创建 venv、安装锁定依赖与执行跨平台 App bootstrap（下载 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) 官方代码），不会要求用户配置解释器、Homebrew、PATH 或 shell。
 2. **转写**：选择 Qwen3-ASR 0.6B / 1.7B 或 Whisper Small / Medium / Large-v3（可多选），选择 Hugging Face、ModelScope 或自动回退来源，下载后选择音频或视频素材与语言；生成后先查看文稿与字幕，再按需保存或复制。保存会创建 platform 的 `transcript` 素材：一个 bundle 同时包含与时间戳对齐的源声音轨、SRT 字幕与 transcript.json，可在素材库直接播放、按分段阅读或下载 SRT/JSON。Qwen 会同时安装官方时间戳对齐器。
 3. **声音角色**：确认已安装任一语音模型，从素材库选择一段人声音频，命名后创建角色；创建过程自动生成角色提示词。
 4. **配音**：确认已下载 CosyVoice2 权重并至少有一个角色，输入文本、选择角色和情绪，生成后先试听私有预览，满意时保存到素材库。
@@ -19,7 +19,7 @@
 
 ## 本地依赖
 
-`manifest.json` 的 `runtime.python` 是唯一的环境声明：平台创建 venv、按 `python/requirements.lock` 安装 PyTorch、faster-whisper、Qwen 官方 `qwen-asr` 与 CosyVoice 推理依赖；`bootstrap.sh` 是不受产品约束的兜底脚本，本 App 用它浅克隆 CosyVoice 官方仓库。每次模型下载都可选择 Hugging Face 或 ModelScope；自动模式先尝试 Hugging Face，失败后改用 ModelScope。Whisper 权重来自 Systran/faster-whisper-*；Qwen 模型来自 Qwen/Qwen3-ASR-*，并配套 Qwen3-ForcedAligner-0.6B；CosyVoice2-0.5B 来自 FunAudioLLM/CosyVoice2-0.5B。音频抽取、16k 参考音归一化都要求本机 `ffmpeg` 已可执行；安装、下载、转写、角色准备和合成均作为可取消任务运行，进度和错误显示在界面和项目事件流中，错误可直接交给右侧 Codex 处理。
+`manifest.json` 的 `runtime.python` 是唯一的环境声明：平台自动取得声明的 Python 版本与 FFmpeg，创建 venv、按 `python/requirements.lock` 安装 PyTorch、faster-whisper、Qwen 官方 `qwen-asr` 与 CosyVoice 推理依赖；`bootstrap.py` 是跨平台兜底脚本，用受管 Python 下载 CosyVoice 与 Matcha-TTS 官方代码。每次模型下载都可选择 Hugging Face 或 ModelScope；自动模式先尝试 Hugging Face，失败后改用 ModelScope。Whisper 权重来自 Systran/faster-whisper-*；Qwen 模型来自 Qwen/Qwen3-ASR-*，并配套 Qwen3-ForcedAligner-0.6B；CosyVoice2-0.5B 来自 FunAudioLLM/CosyVoice2-0.5B。安装、下载、转写、角色准备和合成均作为可取消任务运行，进度和错误显示在界面和项目事件流中，错误可直接交给右侧 Codex 处理。
 
 ## 数据边界
 
@@ -61,7 +61,7 @@ npm run build
 ```text
 AGENTS.md               Agent 执行边界与生成/保存规则
 background.js           App SQLite、素材复制、Python 调用与显式导入素材库的 operation
-bootstrap.sh            App 自由执行的 CosyVoice 官方仓库准备兜底脚本；不拥有 venv 或 pip 生命周期
+bootstrap.py            跨平台的 CosyVoice 官方代码准备兜底脚本；不拥有 venv 或 pip 生命周期
 manifest.json           独立 App 身份、权限和 operation 契约
 python/                 平台 venv 的 lockfile、模型下载和转写/角色/合成 launcher
 skills/                 App skill：约束 Agent 只能使用公开 operation 契约
