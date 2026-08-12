@@ -1,12 +1,12 @@
 /**
  * [INPUT]: 依赖 Recut SDK、声音工坊 operation、平台素材选择器、素材库上传 HTTP、shadcn/ui 组件与 React 状态
- * [OUTPUT]: 对外提供三步声音工作流导航、Download Source、Whisper/Qwen/CosyVoice 模型下载、转写文稿与 SRT、转写保存为素材库 bundle、声音角色创建/试听/删除、角色配音合成与试听、私有预览、历史、实时计时/日志、任务停止和用户确认入库工作台
+ * [OUTPUT]: 对外提供三步声音工作流导航、会话级配音草稿、Download Source、Whisper/Qwen/CosyVoice 模型下载、转写文稿与 SRT、转写保存为素材库 bundle、声音角色创建/试听/删除、角色配音合成与试听，以及历史小卡片点击后在共享详情预览中操作、实时计时/日志、任务停止和用户确认入库工作台
  * [POS]: audio-studio UI 编排层；仅在环境和选定模型就绪后开放推理，生成结果先留在 App 私有文件区
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 import { createRoot } from "react-dom/client";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AudioLines, Check, CircleStop, Clock3, Copy, Download, FileAudio, FolderOpen, LoaderCircle, MessageSquareText, Mic, Save, Send, Sparkles, Trash2, Upload, Video } from "lucide-react";
+import { AudioLines, Check, CircleStop, Clock3, Copy, Download, FileAudio, FolderOpen, LoaderCircle, MessageSquareText, Mic, Save, Send, Sparkles, Trash2, Upload, Video, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -50,6 +50,26 @@ const styles: { id: VoiceStyle; label: string; note: string }[] = [
 ];
 
 type ActiveJob = { id: string; action: ActiveAudioJob["action"]; recordID?: string; startedAt: number; status: ShellJob["status"]; error?: string };
+type HistoryPreview = { kind: "transcript"; item: TranscriptDetail } | { kind: "character"; item: VoiceCharacter } | { kind: "synthesis"; item: Synthesis };
+type SynthesisDraft = { text: string; characterId: string; style: VoiceStyle };
+
+const synthesisDraftStorageKey = "recut.audio-studio.synthesis-draft.v1";
+
+function readSynthesisDraft(): SynthesisDraft {
+  try {
+    const draft = JSON.parse(window.sessionStorage.getItem(synthesisDraftStorageKey) || "{}") as Partial<SynthesisDraft>;
+    return {
+      text: typeof draft.text === "string" ? draft.text : "",
+      characterId: typeof draft.characterId === "string" ? draft.characterId : "",
+      style: styles.some((item) => item.id === draft.style) ? draft.style : "neutral",
+    };
+  } catch (_) { return { text: "", characterId: "", style: "neutral" }; }
+}
+
+function saveSynthesisDraft(draft: SynthesisDraft) {
+  try { window.sessionStorage.setItem(synthesisDraftStorageKey, JSON.stringify(draft)); }
+  catch (_) { /* 浏览器禁止会话存储时，仍保留当前页面内的 React 状态。 */ }
+}
 
 function isTerminal(status: ShellJob["status"]) { return status !== "queued" && status !== "running"; }
 function isValidActiveJob(job: ActiveAudioJob | null | undefined): job is ActiveAudioJob { return Boolean(job?.id && ["prepare", "install", "transcribe", "character", "synthesize"].includes(job.action) && ["queued", "running", "completed", "failed", "cancelled", "interrupted"].includes(job.status)); }
@@ -61,9 +81,11 @@ function formatTimecode(seconds: number) { const milliseconds = Math.max(0, Math
 function buildSRT(segments: TranscriptSegment[]) { return segments.map((segment, index) => `${index + 1}\n${formatTimecode(segment.start)} --> ${formatTimecode(segment.end)}\n${segment.text}`).join("\n\n") + "\n"; }
 async function copyText(text: string) { try { await navigator.clipboard.writeText(text); return true; } catch (_) { return false; } }
 function downloadBlob(name: string, content: string, mimeType: string) { const blob = new Blob([content], { type: mimeType }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url); }
+function downloadFile(name: string, url: string) { const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); }
 function timestamp(createdAt: string) { return new Date(createdAt).toLocaleString("zh-CN"); }
 
 function App() {
+  const [initialSynthesisDraft] = useState(readSynthesisDraft);
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [transcripts, setTranscripts] = useState<TranscriptSummary[]>([]);
   const [characters, setCharacters] = useState<VoiceCharacter[]>([]);
@@ -79,9 +101,9 @@ function App() {
   const [characterName, setCharacterName] = useState("");
   const [characterAssetId, setCharacterAssetId] = useState("");
   const [characterAsset, setCharacterAsset] = useState<MediaAsset | null>(null);
-  const [synthesisText, setSynthesisText] = useState("");
-  const [synthesisCharacterId, setSynthesisCharacterId] = useState("");
-  const [style, setStyle] = useState<VoiceStyle>("neutral");
+  const [synthesisText, setSynthesisText] = useState(initialSynthesisDraft.text);
+  const [synthesisCharacterId, setSynthesisCharacterId] = useState(initialSynthesisDraft.characterId);
+  const [style, setStyle] = useState<VoiceStyle>(initialSynthesisDraft.style);
   const [busy, setBusy] = useState<"prepare" | "install" | "transcribe" | "character" | "synthesize" | "save" | "upload" | "agent" | null>(null);
   const [message, setMessage] = useState("正在启动…");
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
@@ -92,6 +114,7 @@ function App() {
   const [cancelling, setCancelling] = useState(false);
   const [currentTranscript, setCurrentTranscript] = useState<TranscriptDetail | null>(null);
   const [selectedSynthesis, setSelectedSynthesis] = useState<Synthesis | null>(null);
+  const [historyPreview, setHistoryPreview] = useState<HistoryPreview | null>(null);
   const finalizingJob = useRef<string | null>(null);
   const logsRef = useRef<ShellJobLog[]>([]);
   const bottomTabSelectedByUser = useRef(false);
@@ -142,6 +165,7 @@ function App() {
   }, [restoreJob]);
 
   useEffect(() => { logsRef.current = logs; }, [logs]);
+  useEffect(() => { saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, style }); }, [style, synthesisCharacterId, synthesisText]);
   useEffect(() => { window.addEventListener("recut-sdk-ready", refresh); void refresh(); return () => window.removeEventListener("recut-sdk-ready", refresh); }, [refresh]);
   useEffect(() => { void loadAssets().catch((error) => setMessage(error.message)); }, [loadAssets]);
   useEffect(() => { if (isValidActiveJob(status?.activeJob)) restoreJob(status.activeJob); }, [restoreJob, status?.activeJob]);
@@ -250,11 +274,11 @@ function App() {
   };
 
   const synthesizeVoice = async () => {
-    if (!synthesisCharacterId) return setMessage("先选择一个声音角色。");
     if (!synthesisText.trim()) return setMessage("先输入要朗读的文本。");
+    saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, style });
     setBusy("synthesize"); setFailure(""); showLogsForNewJob(); setLogs([]);
     setMessage("正在合成配音…");
-    try { const result = await recut.background.call("audio.synthesize", { characterId: synthesisCharacterId, text: synthesisText, style }) as { job: ShellJob; synthesis: { id: string } }; beginJob(result.job, "synthesize", result.synthesis.id); }
+    try { const result = await recut.background.call("audio.synthesize", { ...(synthesisCharacterId ? { characterId: synthesisCharacterId } : {}), text: synthesisText, style }) as { job: ShellJob; synthesis: { id: string } }; beginJob(result.job, "synthesize", result.synthesis.id); }
     catch (error) { setMessage(error instanceof Error ? error.message : "合成失败。"); setBusy(null); }
   };
 
@@ -305,23 +329,23 @@ function App() {
     finally { setBusy(null); }
   };
 
-  const saveTranscript = async (transcript: TranscriptDetail) => {
+  const saveTranscript = async (transcript: Pick<TranscriptSummary, "id">) => {
     setBusy("save");
-    try { const result = await recut.background.call("audio.save", { id: transcript.id, kind: "transcript" }) as { assetId: string }; setTranscripts((items) => items.map((item) => item.id === transcript.id ? { ...item, savedAssetId: result.assetId } : item)); setCurrentTranscript((current) => current && current.id === transcript.id ? { ...current, savedAssetId: result.assetId } : current); setMessage("转写文稿已保存为素材库的转写素材。"); }
+    try { const result = await recut.background.call("audio.save", { id: transcript.id, kind: "transcript" }) as { assetId: string }; setTranscripts((items) => items.map((item) => item.id === transcript.id ? { ...item, savedAssetId: result.assetId } : item)); setCurrentTranscript((current) => current && current.id === transcript.id ? { ...current, savedAssetId: result.assetId } : current); setHistoryPreview((current) => current?.kind === "transcript" && current.item.id === transcript.id ? { ...current, item: { ...current.item, savedAssetId: result.assetId } } : current); setMessage("转写文稿已保存为素材库的转写素材。"); }
     catch (error) { setMessage(error instanceof Error ? error.message : "保存失败。"); }
     finally { setBusy(null); }
   };
 
   const saveSynthesis = async (synthesis: Synthesis) => {
     setBusy("save");
-    try { const result = await recut.background.call("audio.save", { id: synthesis.id, kind: "synthesis" }) as { assetId: string }; setSyntheses((items) => items.map((item) => item.id === synthesis.id ? { ...item, savedAssetId: result.assetId } : item)); setMessage("配音已保存到素材库。"); }
+    try { const result = await recut.background.call("audio.save", { id: synthesis.id, kind: "synthesis" }) as { assetId: string }; setSyntheses((items) => items.map((item) => item.id === synthesis.id ? { ...item, savedAssetId: result.assetId } : item)); setHistoryPreview((current) => current?.kind === "synthesis" && current.item.id === synthesis.id ? { ...current, item: { ...current.item, savedAssetId: result.assetId } } : current); setMessage("配音已保存到素材库。"); }
     catch (error) { setMessage(error instanceof Error ? error.message : "保存失败。"); }
     finally { setBusy(null); }
   };
 
   const saveCharacter = async (character: VoiceCharacter) => {
     setBusy("save");
-    try { const result = await recut.background.call("audio.save", { id: character.id, kind: "character" }) as { assetId: string }; setCharacters((items) => items.map((item) => item.id === character.id ? { ...item, sampleAssetId: result.assetId } : item)); setMessage("角色参考音已保存到素材库。"); }
+    try { const result = await recut.background.call("audio.save", { id: character.id, kind: "character" }) as { assetId: string }; setCharacters((items) => items.map((item) => item.id === character.id ? { ...item, sampleAssetId: result.assetId } : item)); setHistoryPreview((current) => current?.kind === "character" && current.item.id === character.id ? { ...current, item: { ...current.item, sampleAssetId: result.assetId } } : current); setMessage("角色参考音已保存到素材库。"); }
     catch (error) { setMessage(error instanceof Error ? error.message : "保存失败。"); }
     finally { setBusy(null); }
   };
@@ -345,6 +369,12 @@ function App() {
 
   const updateSegmentText = (index: number, text: string) => {
     setCurrentTranscript((current) => current ? { ...current, segments: current.segments.map((segment, cursor) => cursor === index ? { ...segment, text } : segment) } : current);
+    setHistoryPreview((current) => current?.kind === "transcript" ? { ...current, item: { ...current.item, segments: current.item.segments.map((segment, cursor) => cursor === index ? { ...segment, text } : segment) } } : current);
+  };
+
+  const openHistoryTranscript = async (id: string) => {
+    try { const detail = await recut.background.call("audio.transcript", { id }) as TranscriptDetail; setHistoryPreview({ kind: "transcript", item: detail }); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "无法打开历史转写。"); }
   };
 
   if (!status?.ready) return <Setup autoPrepare={status !== null} busy={busy} elapsedSeconds={elapsedSeconds} failure={status?.setupError || failure || (!status?.pending ? status?.error || "" : "")} failureLogs={status?.setupLogs ?? []} logs={logs} message={message} pythonVersion={status?.pythonVersion} onPrepare={() => void prepare()} onAskAgent={() => void askAgent()} />;
@@ -373,7 +403,8 @@ function App() {
       <Card className="rounded-lg shadow-none">{controls}</Card>
       <Card className="min-h-[540px] rounded-lg shadow-none">{output}</Card>
     </main>
-    <BottomPanel activeTab={bottomTab} cancelling={cancelling} elapsedSeconds={elapsedSeconds} logs={logs} onCancel={() => void cancel()} onTabChange={selectBottomTab} running={running} tab={tab} transcripts={transcripts} characters={characters} syntheses={syntheses} />
+    <BottomPanel activeTab={bottomTab} cancelling={cancelling} elapsedSeconds={elapsedSeconds} logs={logs} onCancel={() => void cancel()} onOpenCharacter={(character) => setHistoryPreview({ kind: "character", item: character })} onOpenSynthesis={(synthesis) => setHistoryPreview({ kind: "synthesis", item: synthesis })} onOpenTranscript={(id) => void openHistoryTranscript(id)} onTabChange={selectBottomTab} running={running} tab={tab} transcripts={transcripts} characters={characters} syntheses={syntheses} />
+    {historyPreview && <HistoryPreviewDialog busy={busy} onClose={() => setHistoryPreview(null)} onEditSegment={updateSegmentText} onSaveCharacter={(character) => void saveCharacter(character)} onSaveSynthesis={(synthesis) => void saveSynthesis(synthesis)} onSaveTranscript={(transcript) => void saveTranscript(transcript)} preview={historyPreview} />}
   </div>;
 }
 
@@ -492,7 +523,10 @@ function SynthesizeControls({ busy, characters, downloadSource, setDownloadSourc
     </ControlSection>
     <Separator />
     <ControlSection eyebrow="声音" title="选择声音角色">
-      {characters.length ? <div className="grid max-h-52 gap-1 overflow-auto pr-1">{characters.map((character) => <button aria-pressed={synthesisCharacterId === character.id} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", synthesisCharacterId === character.id ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} key={character.id} onClick={() => setSynthesisCharacterId(character.id)} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{character.name}</strong><small className="truncate text-muted-foreground">{character.promptText ? `提示词已就绪 · ${character.promptText.length} 字` : "提示词未生成"}</small></span>{synthesisCharacterId === character.id && <Check className="size-3.5 shrink-0 text-primary" />}</button>)}</div> : <p className="text-xs leading-relaxed text-muted-foreground">还没有声音角色，先到“声音角色”创建。</p>}
+      <div className="grid max-h-52 gap-1 overflow-auto pr-1">
+        <button aria-pressed={!synthesisCharacterId} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", !synthesisCharacterId ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} onClick={() => setSynthesisCharacterId("")} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">CosyVoice 官方默认声音</strong><small className="truncate text-muted-foreground">无需创建角色，用于直接合成与模型验证</small></span>{!synthesisCharacterId && <Check className="size-3.5 shrink-0 text-primary" />}</button>
+        {characters.map((character) => <button aria-pressed={synthesisCharacterId === character.id} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", synthesisCharacterId === character.id ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} key={character.id} onClick={() => setSynthesisCharacterId(character.id)} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{character.name}</strong><small className="truncate text-muted-foreground">{character.promptText ? `提示词已就绪 · ${character.promptText.length} 字` : "提示词未生成"}</small></span>{synthesisCharacterId === character.id && <Check className="size-3.5 shrink-0 text-primary" />}</button>)}
+      </div>
     </ControlSection>
     <Separator />
     <ControlSection eyebrow="风格" title="情绪指令">
@@ -503,7 +537,7 @@ function SynthesizeControls({ busy, characters, downloadSource, setDownloadSourc
       <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
       <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载 CosyVoice2 权重</Button>
     </ControlSection>}
-    <Button disabled={busy !== null || !synthesisCharacterId || !synthesisText.trim() || !ttsReady} onClick={onRun} type="button" size="lg">{busy === "synthesize" ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}合成配音</Button>
+    <Button disabled={busy !== null || !synthesisText.trim() || !ttsReady} onClick={onRun} type="button" size="lg">{busy === "synthesize" ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}合成配音</Button>
   </CardContent>;
 }
 
@@ -566,9 +600,13 @@ function CharactersOutput({ busy, characters, onRemove, onSave }: { busy: string
   return <CardContent className="flex h-full flex-col gap-4">
     <div className="flex items-center justify-between border-b pb-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">声音角色</p><h2 className="mt-0.5 text-sm font-semibold">可复用角色库</h2></div><Badge variant="secondary">{characters.length} 个</Badge></div>
     <div className="grid flex-1 content-start gap-3 overflow-auto">
-      {characters.length ? characters.map((character) => <Card className="rounded-lg shadow-none" key={character.id}><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-sm">{character.name}</CardTitle>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div><CardDescription className="truncate text-[11px]">参考转写：{character.model.replace("whisper-", "")}</CardDescription></CardHeader><CardContent className="grid gap-2"><audio className="w-full" controls preload="metadata" src={character.sampleURL} /><p className="truncate text-[11px] text-muted-foreground" title={character.promptText}>提示词：{character.promptText || "（尚未生成）"}</p></CardContent><CardFooter className="justify-between gap-2"><Button disabled={busy !== null} onClick={() => onSave(character)} type="button" variant="outline" size="sm"><Save className="size-3.5" />保存参考音</Button><Button disabled={busy !== null} onClick={() => onRemove(character)} type="button" variant="ghost" size="sm" className="text-destructive hover:text-destructive"><Trash2 className="size-3.5" />删除</Button></CardFooter></Card>) : <div className="grid place-items-center gap-2 py-16 text-center text-sm text-muted-foreground"><Mic className="size-7 text-muted-foreground/60" /><p>用一段参考人声创建声音角色，之后就能让它朗读任何文本。</p></div>}
+      {characters.length ? characters.map((character) => <CharacterPreview busy={busy} character={character} key={character.id} onRemove={() => onRemove(character)} onSave={() => onSave(character)} />) : <div className="grid place-items-center gap-2 py-16 text-center text-sm text-muted-foreground"><Mic className="size-7 text-muted-foreground/60" /><p>用一段参考人声创建声音角色，之后就能让它朗读任何文本。</p></div>}
     </div>
   </CardContent>;
+}
+
+function CharacterPreview({ busy, character, onRemove, onSave }: { busy: string | null; character: VoiceCharacter; onRemove?: () => void; onSave: () => void }) {
+  return <Card className="rounded-lg shadow-none"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-3"><CardTitle className="min-w-0 truncate text-sm">{character.name}</CardTitle>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div><CardDescription className="text-[11px]">参考转写：{character.model.replace("whisper-", "")} · {timestamp(character.createdAt)}</CardDescription></CardHeader><CardContent className="grid gap-3"><audio className="w-full" controls preload="metadata" src={character.sampleURL} /><div className="grid gap-1"><p className="text-[11px] font-medium text-muted-foreground">角色提示词</p><p className="max-h-32 overflow-auto rounded-md bg-muted/60 p-2.5 text-xs leading-relaxed">{character.promptText || "（尚未生成）"}</p></div></CardContent><CardFooter className="justify-between gap-2"><Button disabled={busy !== null || Boolean(character.sampleAssetId)} onClick={onSave} type="button" variant="outline" size="sm"><Save className="size-3.5" />{character.sampleAssetId ? "素材库已保存" : "保存参考音"}</Button>{onRemove && <Button disabled={busy !== null} onClick={onRemove} type="button" variant="ghost" size="sm" className="text-destructive hover:text-destructive"><Trash2 className="size-3.5" />删除</Button>}</CardFooter></Card>;
 }
 
 function SynthesisOutput({ busy, selected, syntheses, onSave }: { busy: string | null; selected: Synthesis | null; syntheses: Synthesis[]; onSave: (synthesis: Synthesis) => void }) {
@@ -582,7 +620,7 @@ function SynthesisOutput({ busy, selected, syntheses, onSave }: { busy: string |
   </CardContent>;
 }
 
-function BottomPanel({ activeTab, cancelling, elapsedSeconds, logs, onCancel, onTabChange, running, tab, transcripts, characters, syntheses }: { activeTab: "history" | "logs"; cancelling: boolean; elapsedSeconds: number; logs: ShellJobLog[]; onCancel: () => void; onTabChange: (tab: "history" | "logs") => void; running: boolean; tab: Tab; transcripts: TranscriptSummary[]; characters: VoiceCharacter[]; syntheses: Synthesis[] }) {
+function BottomPanel({ activeTab, cancelling, elapsedSeconds, logs, onCancel, onOpenCharacter, onOpenSynthesis, onOpenTranscript, onTabChange, running, tab, transcripts, characters, syntheses }: { activeTab: "history" | "logs"; cancelling: boolean; elapsedSeconds: number; logs: ShellJobLog[]; onCancel: () => void; onOpenCharacter: (character: VoiceCharacter) => void; onOpenSynthesis: (synthesis: Synthesis) => void; onOpenTranscript: (id: string) => void; onTabChange: (tab: "history" | "logs") => void; running: boolean; tab: Tab; transcripts: TranscriptSummary[]; characters: VoiceCharacter[]; syntheses: Synthesis[] }) {
   const historyCount = tab === "transcribe" ? transcripts.length : tab === "characters" ? characters.length : syntheses.length;
   return <Card className="mt-4 rounded-lg shadow-none">
     <div className="flex items-center gap-1 border-b bg-muted/30 px-3 py-2" role="tablist" aria-label="输出记录">
@@ -591,16 +629,44 @@ function BottomPanel({ activeTab, cancelling, elapsedSeconds, logs, onCancel, on
       {running && <Button className="ml-auto text-destructive hover:text-destructive" disabled={cancelling} onClick={onCancel} type="button" variant="ghost" size="sm"><CircleStop className="size-3.5" />{cancelling ? "正在停止" : "停止任务"}</Button>}
     </div>
     <div className="min-h-40">
-      {activeTab === "history" ? <div aria-labelledby="audio-history-tab" id="audio-history" role="tabpanel"><History tab={tab} transcripts={transcripts} characters={characters} syntheses={syntheses} /></div> : <div aria-labelledby="audio-logs-tab" className="min-h-40 bg-terminal text-terminal-fg" id="audio-logs" role="tabpanel">{running && <p className="flex items-center gap-1.5 border-b border-white/10 px-4 py-3 font-mono text-[11px] font-semibold text-primary"><Clock3 className="size-3.5" />任务运行中 · {formatElapsed(elapsedSeconds)}</p>}<pre className="max-h-56 overflow-auto p-4 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{logs.length ? logText(logs) : "正在等待任务输出…"}</pre></div>}
+      {activeTab === "history" ? <div aria-labelledby="audio-history-tab" id="audio-history" role="tabpanel"><History onOpenCharacter={onOpenCharacter} onOpenSynthesis={onOpenSynthesis} onOpenTranscript={onOpenTranscript} tab={tab} transcripts={transcripts} characters={characters} syntheses={syntheses} /></div> : <div aria-labelledby="audio-logs-tab" className="min-h-40 bg-terminal text-terminal-fg" id="audio-logs" role="tabpanel">{running && <p className="flex items-center gap-1.5 border-b border-white/10 px-4 py-3 font-mono text-[11px] font-semibold text-primary"><Clock3 className="size-3.5" />任务运行中 · {formatElapsed(elapsedSeconds)}</p>}<pre className="max-h-56 overflow-auto p-4 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{logs.length ? logText(logs) : "正在等待任务输出…"}</pre></div>}
     </div>
   </Card>;
 }
 
-function History({ tab, transcripts, characters, syntheses }: { tab: Tab; transcripts: TranscriptSummary[]; characters: VoiceCharacter[]; syntheses: Synthesis[] }) {
-  const items = tab === "transcribe" ? transcripts.map((item) => ({ key: item.id, title: item.sourceKind === "video" ? "视频转写" : "音频转写", note: `${speechModels.find((m) => m.id === item.model)?.label ?? item.model} · ${item.language === "auto" ? "自动" : item.language} · ${item.duration.toFixed(1)}s`, at: timestamp(item.createdAt) }))
-    : tab === "characters" ? characters.map((item) => ({ key: item.id, title: item.name, note: item.promptText ? `提示词已就绪 · ${item.promptText.length} 字` : "提示词未生成", at: timestamp(item.createdAt) }))
-    : syntheses.map((item) => ({ key: item.id, title: styles.find((s) => s.id === item.style)?.label ?? item.style, note: item.text.slice(0, 36) + (item.text.length > 36 ? "…" : ""), at: timestamp(item.createdAt) }));
-  return <div aria-labelledby="audio-history-tab" id="audio-history" role="tabpanel"><div className="flex items-center justify-between border-b px-4 py-2.5"><h3 className="text-sm font-semibold">全部输出</h3><span className="font-mono text-[11px] text-muted-foreground">{items.length} 条</span></div>{items.length ? <ul className="divide-y">{items.map((item) => <li className="flex items-center justify-between gap-3 px-4 py-2" key={item.key}><div className="grid min-w-0 gap-0.5"><strong className="truncate text-xs">{item.title}</strong><span className="truncate text-[11px] text-muted-foreground">{item.note}</span></div><span className="font-mono text-[10px] text-muted-foreground">{item.at}</span></li>)}</ul> : <p className="px-4 py-4 text-xs text-muted-foreground">还没有历史输出。</p>}</div>;
+function History({ onOpenCharacter, onOpenSynthesis, onOpenTranscript, tab, transcripts, characters, syntheses }: { onOpenCharacter: (character: VoiceCharacter) => void; onOpenSynthesis: (synthesis: Synthesis) => void; onOpenTranscript: (id: string) => void; tab: Tab; transcripts: TranscriptSummary[]; characters: VoiceCharacter[]; syntheses: Synthesis[] }) {
+  const items = tab === "transcribe" ? transcripts : tab === "characters" ? characters : syntheses;
+  return <div><div className="flex items-center justify-between border-b px-4 py-2.5"><h3 className="text-sm font-semibold">全部输出</h3><span className="font-mono text-[11px] text-muted-foreground">{items.length} 条</span></div>{items.length ? <div className="grid gap-3 p-4 min-[700px]:grid-cols-2">{tab === "transcribe" ? transcripts.map((item) => <HistoryTranscriptCard item={item} key={item.id} onOpen={onOpenTranscript} />) : tab === "characters" ? characters.map((item) => <HistoryCharacterCard item={item} key={item.id} onOpen={onOpenCharacter} />) : syntheses.map((item) => <HistorySynthesisCard item={item} key={item.id} onOpen={onOpenSynthesis} />)}</div> : <p className="px-4 py-4 text-xs text-muted-foreground">还没有历史输出。</p>}</div>;
+}
+
+function HistoryTranscriptCard({ item, onOpen }: { item: TranscriptSummary; onOpen: (id: string) => void }) {
+  const label = item.sourceKind === "video" ? "视频转写" : "音频转写";
+  return <button aria-label={`打开${label}详情`} className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item.id)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{label}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{speechModels.find((model) => model.id === item.model)?.label ?? item.model} · {item.language === "auto" ? "自动" : item.language}</p></div>{item.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div><p className="font-mono text-[10px] text-muted-foreground">{item.duration.toFixed(1)} 秒 · {timestamp(item.createdAt)}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">点击查看详情</p></button>;
+}
+
+function HistoryCharacterCard({ item, onOpen }: { item: VoiceCharacter; onOpen: (item: VoiceCharacter) => void }) {
+  return <button aria-label={`打开声音角色 ${item.name} 详情`} className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{item.name}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{item.model.replace("whisper-", "")} · {timestamp(item.createdAt)}</p></div>{item.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div><p className="line-clamp-2 text-[11px] text-muted-foreground">提示词：{item.promptText || "（尚未生成）"}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">点击查看详情</p></button>;
+}
+
+function HistorySynthesisCard({ item, onOpen }: { item: Synthesis; onOpen: (item: Synthesis) => void }) {
+  return <button aria-label="打开配音详情" className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{styles.find((style) => style.id === item.style)?.label ?? item.style}配音</p><p className="mt-0.5 text-[11px] text-muted-foreground">{item.duration.toFixed(1)} 秒 · {timestamp(item.createdAt)}</p></div>{item.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div><p className="line-clamp-2 text-[11px] text-muted-foreground">{item.text}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">点击查看详情</p></button>;
+}
+
+function HistoryPreviewDialog({ busy, onClose, onEditSegment, onSaveCharacter, onSaveSynthesis, onSaveTranscript, preview }: { busy: string | null; onClose: () => void; onEditSegment: (index: number, text: string) => void; onSaveCharacter: (character: VoiceCharacter) => void; onSaveSynthesis: (synthesis: Synthesis) => void; onSaveTranscript: (transcript: TranscriptDetail) => void; preview: HistoryPreview }) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  const title = preview.kind === "transcript" ? "转写详情" : preview.kind === "character" ? "声音角色详情" : "配音详情";
+  const content = preview.kind === "transcript"
+    ? <TranscriptOutput busy={busy} onEditSegment={onEditSegment} onSave={onSaveTranscript} transcript={preview.item} />
+    : preview.kind === "character"
+      ? <div className="p-6"><CharacterPreview busy={busy} character={preview.item} onSave={() => onSaveCharacter(preview.item)} /></div>
+      : <SynthesisOutput busy={busy} onSave={onSaveSynthesis} selected={preview.item} syntheses={[]} />;
+
+  return <div aria-labelledby="history-preview-title" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-foreground/30 p-4 backdrop-blur-[1px]" onClick={onClose} role="dialog"><div className="relative max-h-[calc(100vh-2rem)] w-full max-w-4xl overflow-auto rounded-lg border bg-card shadow-xl" onClick={(event) => event.stopPropagation()}><div className="sticky top-0 z-10 flex items-center justify-between border-b bg-card/95 px-6 py-3 backdrop-blur"><h2 className="text-sm font-semibold" id="history-preview-title">{title}</h2><Button aria-label="关闭详情" onClick={onClose} type="button" variant="ghost" size="icon"><X className="size-4" /></Button></div>{content}</div></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

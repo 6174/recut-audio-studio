@@ -1,7 +1,7 @@
 /*
  * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务
- * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、声音角色创建、配音合成、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材
- * [POS]: audio-studio 的唯一业务后端；输出先停留在 App 文件沙箱，绝不在生成时自动创建素材库 Asset
+ * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、配音合成、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材
+ * [POS]: audio-studio 的唯一业务后端；声音角色须通过质量验收，未选角色时使用 CosyVoice 官方默认声音进入 TTS，输出先停留在 App 文件沙箱，绝不在生成时自动创建素材库 Asset
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 
@@ -321,6 +321,11 @@ function characterRecord(ctx, row) {
   return record;
 }
 
+function characterQuality(ctx, row) {
+  const meta = readJSON(ctx, `${row.sample_path}.meta.json`);
+  return meta?.quality?.passed === true && Number(meta?.speaker?.dimensions) > 0 && Number(meta?.calibration?.fidelity) >= 0.85 ? meta : null;
+}
+
 function characterComplete(input, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
@@ -330,9 +335,13 @@ function characterComplete(input, ctx) {
   const row = rows[0];
   if (row.status === "queued" || row.status === "") return { id: row.id, status: "queued" };
   const meta = readJSON(ctx, `${row.sample_path}.meta.json`);
-  if (row.status === "completed" && meta && meta.promptText) {
+  if (row.status === "completed" && meta && meta.promptText && meta.quality?.passed === true && Number(meta.speaker?.dimensions) > 0 && Number(meta.calibration?.fidelity) >= 0.85) {
     ctx.sqlite.execute("update audio_characters set prompt_text = ? where id = ?", [meta.promptText, id]);
     row.prompt_text = meta.promptText;
+  }
+  if (row.status === "completed" && !characterQuality(ctx, row)) {
+    ctx.sqlite.execute("update audio_characters set status = 'failed', error = '声音角色未通过参考音、声纹或朗读回读验收，请重新创建。' where id = ?", [id]);
+    return { id: row.id, status: "failed", error: "声音角色未通过参考音、声纹或朗读回读验收，请重新创建。" };
   }
   const record = characterRecord(ctx, row);
   if (!record) throw new Error("Audio character sample is missing.");
@@ -342,7 +351,7 @@ function characterComplete(input, ctx) {
 function characters(_, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
-  return ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, created_at from audio_characters where status = 'completed' order by created_at desc").map((row) => characterRecord(ctx, row)).filter(Boolean);
+  return ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, created_at from audio_characters where status = 'completed' order by created_at desc").filter((row) => characterQuality(ctx, row)).map((row) => characterRecord(ctx, row)).filter(Boolean);
 }
 
 function characterRemove(input, ctx) {
@@ -360,19 +369,21 @@ function synthesize(input, ctx) {
   const characterID = value(input, "characterId");
   const text = value(input, "text");
   const style = value(input, "style") || "neutral";
-  if (!characterID || !text) throw new Error("characterId and text are required");
+  if (!text) throw new Error("text is required");
   if (!STYLES.has(style)) throw new Error("style must be neutral, calm, excited, or gentle");
   ensureNoActiveJob(ctx);
-  const characters = ctx.sqlite.query("select id, sample_path, prompt_text from audio_characters where id = ? and status = 'completed'", [characterID]);
-  if (!characters.length) throw new Error("Selected voice character was not found.");
-  const character = characters[0];
-  if (!character.prompt_text) throw new Error("Voice character has no prompt text; recreate it with an installed Whisper model.");
+  const characters = characterID ? ctx.sqlite.query("select id, sample_path, prompt_text from audio_characters where id = ? and status = 'completed'", [characterID]).filter((row) => characterQuality(ctx, row)) : [];
+  if (characterID && !characters.length) throw new Error("Selected voice character was not found.");
+  const character = characters[0] || { id: "__cosyvoice_default__", sample_path: "", prompt_text: "" };
   const id = outputID();
   const outputPath = `syntheses/${id}.wav`;
   const record = { id, characterId: characterID, text, style, outputPath, mimeType: "audio/wav", savedAssetId: "", createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
   ctx.sqlite.execute("insert into audio_syntheses (id, character_id, text, style, output_path, mime_type, saved_asset_id, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.characterId, record.text, record.style, record.outputPath, record.mimeType, record.savedAssetId, record.createdAt, record.jobId, record.status, record.error]);
   try {
-    const job = ctx.python.run(["python/audio_runner.py", "synthesize", "--text", text, "--reference", character.sample_path, "--prompt-text", character.prompt_text, "--style", style, "--output", outputPath]);
+    const args = ["python/audio_runner.py", "synthesize", "--text", text, "--style", style, "--output", outputPath];
+    if (characterID) args.push("--reference", character.sample_path, "--prompt-text", character.prompt_text);
+    else args.push("--default-voice");
+    const job = ctx.python.run(args);
     const tracked = trackJob(ctx, job, "synthesize", id);
     record.jobId = shellJobID(tracked);
     ctx.sqlite.execute("update audio_syntheses set job_id = ? where id = ?", [record.jobId, id]);

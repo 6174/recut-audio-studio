@@ -37,7 +37,9 @@ window.addEventListener("message", (event) => {
 
 export const recut = {
   state: { query: (name: string) => call("state.query", { name }) },
-  background: { call: (name: string, input: Record<string, unknown> = {}) => call("background.call", { name, ...input }) },
+  // `name` 是业务输入的合法字段（例如声音角色名）。将 operation
+  // 单独封装，避免业务字段覆盖宿主用于路由的 operation 名称。
+  background: { call: (operation: string, input: Record<string, unknown> = {}) => call("background.call", { operation, ...input }) },
   agent: { compose: (prompt: string) => call("agent.compose", { prompt }) },
   media: { pick: (kinds: string[]) => call("media.pick", { kinds }) },
   events: { subscribe: (listener: (event: unknown) => void) => { const handler = (event: Event) => listener((event as CustomEvent).detail); window.addEventListener("recut-project-event", handler); return () => window.removeEventListener("recut-project-event", handler); } },

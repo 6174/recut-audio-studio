@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 vendored assets/mel_filters.npz、torch、numpy 与 tiktoken（CosyVoice 自带 tokenizer 使用）
-[OUTPUT]: 对外提供注入 sys.modules 的 whisper（log_mel_spectrogram）与 whisper.tokenizer（Tokenizer）兼容层，以及 modelscope 的 snapshot_download 占位
-[POS]: audio_runner 的依赖兼容边界；用 vendored 权重替代 openai-whisper 源码安装，绝不触发网络下载
+[OUTPUT]: 对外提供注入 sys.modules 的 whisper（log_mel_spectrogram）与 whisper.tokenizer（Tokenizer）兼容层、modelscope 的 snapshot_download 占位，以及替换 CosyVoice load_wav 的 soundfile 实现
+[POS]: audio_runner 的依赖兼容边界；用 vendored 权重替代 openai-whisper 源码安装，绝不触发网络下载，load_wav 兼容 torchaudio>=2.9（已移除 soundfile 后端）
 [PROTOCOL]: 变更时更新此头部，然后检查 README.md
 """
 from __future__ import annotations
@@ -192,3 +192,37 @@ def install_modelscope() -> None:
 
     module.snapshot_download = snapshot_download
     sys.modules["modelscope"] = module
+
+
+def install_load_wav() -> None:
+    """Replaces CosyVoice's torchaudio-backed load_wav with a soundfile-based one.
+
+    torchaudio >= 2.9 removed the soundfile backend that
+    cosyvoice.utils.file_utils.load_wav passes as backend='soundfile', so a
+    reference wav/tensor must round-trip through the soundfile package instead.
+    Patch the module before cosyvoice.cli.frontend is imported so its
+    `from cosyvoice.utils.file_utils import load_wav` binding picks it up.
+    """
+    import torch
+    import torchaudio
+    import cosyvoice.utils.file_utils as file_utils
+
+    def load_wav(wav, target_sr, min_sr=16000):
+        import soundfile as sf
+
+        if isinstance(wav, torch.Tensor):
+            speech = wav.detach().cpu()
+            sample_rate = 16000
+        else:
+            data, sample_rate = sf.read(str(wav), dtype="float32", always_2d=True)
+            speech = torch.from_numpy(data.T)
+        if speech.dim() == 1:
+            speech = speech.unsqueeze(0)
+        if speech.dim() == 2 and speech.shape[0] != 1:
+            speech = speech.mean(dim=0, keepdim=True)
+        if sample_rate != target_sr:
+            assert sample_rate >= min_sr, f"wav sample rate {sample_rate} must be greater than {min_sr}"
+            speech = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sr)(speech)
+        return speech
+
+    file_utils.load_wav = load_wav

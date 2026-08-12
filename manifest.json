@@ -23,25 +23,25 @@
     {
       "name": "audio.status",
       "surfaces": ["api", "mcp"],
-      "description": "检查声音工坊的本地 Python、FFmpeg、Whisper/Qwen3-ASR 模型与 CosyVoice 运行环境和已下载模型。",
+      "description": "检查声音工坊的本地 Python、FFmpeg、Whisper/Qwen3-ASR 模型与 CosyVoice 运行环境和已下载模型；activeJob 返回当前异步任务状态供轮询。",
       "inputSchema": { "type": "object", "properties": {} }
     },
     {
       "name": "audio.prepare",
-      "surfaces": ["api"],
-      "description": "自动安装声音工坊的 Python 运行依赖和 CosyVoice 官方代码，不下载模型权重。",
+      "surfaces": ["api", "mcp"],
+      "description": "自动安装声音工坊的 Python 运行依赖和 CosyVoice 官方代码，不下载模型权重。异步提交，立即返回 job；用平台 recut.job.status / recut.job.wait 轮询终态。",
       "inputSchema": { "type": "object", "properties": {} }
     },
     {
       "name": "audio.install",
       "surfaces": ["api", "mcp"],
-      "description": "安装声音工坊运行依赖，并从 Hugging Face、ModelScope 或自动回退来源下载用户选择的 Whisper、Qwen3-ASR 或 CosyVoice2 权重到 .recut/models/audio-studio。",
+      "description": "安装声音工坊运行依赖，并从 Hugging Face、ModelScope 或自动回退来源下载用户选择的 Whisper、Qwen3-ASR 或 CosyVoice2 权重到 .recut/models/audio-studio。异步提交，立即返回 job；用平台 recut.job.status / recut.job.wait 轮询终态。",
       "inputSchema": { "type": "object", "required": ["model"], "properties": { "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3", "cosyvoice2"] }, "source": { "type": "string", "enum": ["automatic", "huggingface", "modelscope"] } } }
     },
     {
       "name": "audio.transcribe",
       "surfaces": ["api", "mcp"],
-      "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，不会保存到素材库。",
+      "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，不会保存到素材库。异步提交，立即返回 job 与 transcript.id；用平台 recut.job.status / recut.job.wait 轮询，完成后用 audio.transcript(id) 读取分段与 SRT。",
       "inputSchema": { "type": "object", "required": ["assetId", "kind", "model", "language"], "properties": { "assetId": { "type": "string" }, "kind": { "type": "string", "enum": ["audio", "video"] }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] }, "language": { "type": "string", "enum": ["auto", "zh", "en"] } } }
     },
     {
@@ -52,14 +52,14 @@
     },
     {
       "name": "audio.transcript",
-      "surfaces": ["api"],
+      "surfaces": ["api", "mcp"],
       "description": "读取一条已完成的转写记录，返回文稿分段、SRT 正文与可播放的源声音预览。",
       "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
     },
     {
       "name": "audio.character.create",
       "surfaces": ["api", "mcp"],
-      "description": "从一段参考音频素材创建声音角色：抽取 16k 参考音并转写为角色提示词，返回异步任务。",
+      "description": "从一段参考音频素材创建声音角色：自动截取连续人声、验证波形与声纹，并以合成后 ASR 回读校准角色质量，返回异步任务。",
       "inputSchema": { "type": "object", "required": ["assetId", "name", "model"], "properties": { "assetId": { "type": "string" }, "name": { "type": "string" }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] } } }
     },
     {
@@ -83,8 +83,8 @@
     {
       "name": "audio.synthesize",
       "surfaces": ["api", "mcp"],
-      "description": "用一段文本、一个声音角色和可选情绪风格合成配音，返回异步任务。",
-      "inputSchema": { "type": "object", "required": ["characterId", "text"], "properties": { "characterId": { "type": "string" }, "text": { "type": "string" }, "style": { "type": "string", "enum": ["neutral", "calm", "excited", "gentle"] } } }
+      "description": "用一段文本和可选声音角色合成配音；未提供角色时使用 CosyVoice 官方默认声音。所有输出均须通过 ASR 回读文本验收才返回异步任务结果。",
+      "inputSchema": { "type": "object", "required": ["text"], "properties": { "characterId": { "type": "string", "description": "可选；省略时使用 CosyVoice 官方默认声音。" }, "text": { "type": "string" }, "style": { "type": "string", "enum": ["neutral", "calm", "excited", "gentle"] } } }
     },
     {
       "name": "audio.synthesis.complete",

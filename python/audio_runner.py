@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-[INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、faster-whisper、Qwen3-ASR、CosyVoice 官方仓库与 CosyVoice2-0.5B 权重、FFmpeg
-[OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备与合成进度；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、保留与时间戳对齐的源声音轨、16k 角色参考音与合成 wav
-[POS]: audio-studio 的本地执行入口；依赖和模型固定到 .recut/models/audio-studio，不写入素材库
+[INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、主 ASR venv、CosyVoice 专属官方 venv、模型权重与 FFmpeg
+[OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备与合成进度；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、经连续语音/波形/声纹验收的 16k 角色参考音与合成 wav
+[POS]: audio-studio 的本地执行入口；实现 VoiceCloneEngine 的参考音预处理、片段筛选、质量验收和合成后 ASR 回读；CosyVoice 推理通过专属 worker 隔离版本冲突，不写入素材库
 [PROTOCOL]: 变更时更新此头部，然后检查 README.md
 """
 
@@ -11,12 +11,16 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+from difflib import SequenceMatcher
 from pathlib import Path
+
+import numpy as np
 
 WHISPER_MODELS = ["whisper-small", "whisper-medium", "whisper-large-v3"]
 WHISPER_MAP = {"whisper-small": "small", "whisper-medium": "medium", "whisper-large-v3": "large-v3"}
@@ -37,12 +41,22 @@ DOWNLOAD_SOURCES = {"automatic", "huggingface", "modelscope"}
 COSYVOICE_HF = "FunAudioLLM/CosyVoice2-0.5B"
 COSYVOICE_MODEL_DIR = "cosyvoice/pretrained_models/CosyVoice2-0.5B"
 COSYVOICE_REPOSITORY = "cosyvoice/repository"
-MAX_REFERENCE_SECONDS = 30.0
+DEFAULT_PROMPT_AUDIO = "asset/zero_shot_prompt.wav"
+DEFAULT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
+# CosyVoice（含 vendored Matcha-TTS）在模型加载期 import 的第三方包；由 bootstrap 安装进 venv。
+# CosyVoice2 的声纹条件并不受益于整段录音。短、连续且可转写的语音片段
+# 比长录音更稳定，也不会让短文案落入模型的长度失衡区间。
+MAX_REFERENCE_SCAN_SECONDS = 60.0
+MIN_REFERENCE_SECONDS = 3.0
+TARGET_REFERENCE_SECONDS = 6.0
+MIN_REFERENCE_QUALITY_SCORE = 0.75
+MIN_TEXT_FIDELITY = 0.85
+DEFAULT_VERIFICATION_MODEL = "qwen3-asr-0.6b"
 STYLES = {
     "neutral": "",
-    "calm": "用平静舒缓的语气朗读。",
-    "excited": "用兴奋热情的语气朗读。",
-    "gentle": "用温柔的语气朗读。",
+    "calm": "平静",
+    "excited": "兴奋",
+    "gentle": "温柔",
 }
 
 
@@ -183,6 +197,52 @@ def cosyvoice_model() -> Path:
     return model_root() / COSYVOICE_MODEL_DIR
 
 
+def cosyvoice_python() -> Path:
+    value = os.environ.get("RECUT_VENV", "")
+    if not value:
+        return Path("/nonexistent/recut-cosyvoice-python")
+    root = Path(value)
+    return root.with_name(f"{root.name}-cosyvoice") / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def cosyvoice_runner() -> Path:
+    return Path(__file__).with_name("tts_runner.py")
+
+
+def parse_worker_result(result: subprocess.CompletedProcess[str]) -> dict:
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith("{")]
+    if not lines:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or "CosyVoice worker did not return a result.")
+    payload = json.loads(lines[-1])
+    if result.returncode or not payload.get("ready"):
+        raise RuntimeError(str(payload.get("error") or result.stderr or "CosyVoice worker failed."))
+    return payload
+
+
+def run_cosyvoice_worker(args: list[str]) -> dict:
+    python = cosyvoice_python()
+    if not python.is_file():
+        raise RuntimeError("CosyVoice 专属运行环境未就绪，请重新准备声音工坊运行环境。")
+    result = subprocess.run([str(python), str(cosyvoice_runner()), *args], capture_output=True, text=True)
+    for line in result.stdout.splitlines():
+        if not line.lstrip().startswith("{"):
+            print(line, flush=True)
+    return parse_worker_result(result)
+
+
+def cosyvoice_runtime_status() -> dict:
+    python = cosyvoice_python()
+    if not python.is_file():
+        return {"ready": False, "error": "CosyVoice 专属运行环境未就绪。"}
+    result = subprocess.run([str(python), str(cosyvoice_runner()), "status"], capture_output=True, text=True)
+    try:
+        payload = parse_worker_result(result)
+    except RuntimeError as error:
+        return {"ready": False, "error": str(error)}
+    return {"ready": True, "versions": payload.get("versions", {})}
+
+
 def state(root: Path) -> dict:
     problems = []
     if not shutil.which("ffmpeg"):
@@ -198,14 +258,17 @@ def state(root: Path) -> dict:
         installed.extend(qwen_installed)
     repository_ready = (cosyvoice_repo() / "cosyvoice" / "cli" / "cosyvoice.py").is_file() and (cosyvoice_repo() / "third_party" / "Matcha-TTS" / "matcha").is_dir()
     model_ready = (cosyvoice_model() / "cosyvoice2.yaml").is_file()
+    tts_runtime = cosyvoice_runtime_status()
     if not repository_ready:
         problems.append("CosyVoice 官方仓库或 Matcha-TTS 子模块尚未准备。")
+    elif model_ready and not tts_runtime["ready"]:
+        problems.append(tts_runtime["error"])
     return {
         "ready": not problems,
         "modelsRoot": str(root),
         "pythonVersion": f"{sys.version_info.major}.{sys.version_info.minor}",
         "asr": {"installed": installed, "qwenRuntime": qwen_runtime_ready},
-        "tts": {"repository": repository_ready, "model": model_ready, "ready": repository_ready and model_ready},
+        "tts": {"repository": repository_ready, "model": model_ready, "runtime": tts_runtime["ready"], "verification": DEFAULT_VERIFICATION_MODEL in installed, "versions": tts_runtime.get("versions", {}), "ready": repository_ready and model_ready and tts_runtime["ready"] and DEFAULT_VERIFICATION_MODEL in installed},
         "error": " ".join(problems),
     }
 
@@ -215,6 +278,137 @@ def extract_audio(source: Path, target: Path) -> None:
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(f"Could not extract audio: {result.stderr.strip()}")
+
+
+def run_ffmpeg(command: list[str], failure: str) -> str:
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"{failure}: {result.stderr.strip()}")
+    return f"{result.stdout}\n{result.stderr}"
+
+
+def preprocess_reference_audio(source: Path, target: Path) -> None:
+    """Create one predictable 16k mono analysis track without changing speech timing."""
+    run_ffmpeg(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(source), "-vn", "-t", str(MAX_REFERENCE_SCAN_SECONDS), "-af", "highpass=f=80,lowpass=f=7600", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(target)],
+        "Could not prepare reference audio",
+    )
+
+
+def silence_boundaries(audio: Path) -> list[tuple[float, float]]:
+    logs = run_ffmpeg(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(audio), "-af", "silencedetect=noise=-38dB:d=0.32", "-f", "null", "-"],
+        "Could not analyze reference audio",
+    )
+    events: list[tuple[str, float]] = []
+    for kind, value in re.findall(r"silence_(start|end):\s*([0-9.]+)", logs):
+        events.append((kind, float(value)))
+    duration = probe_duration(audio)
+    speech: list[tuple[float, float]] = []
+    cursor = 0.0
+    for kind, value in events:
+        if kind != "start":
+            cursor = value
+            continue
+        if value > cursor:
+            speech.append((cursor, value))
+        cursor = value
+    if duration > cursor:
+        speech.append((cursor, duration))
+    return [(start, end) for start, end in speech if end - start >= 0.2]
+
+
+def select_best_speech_segment(audio: Path) -> tuple[float, float]:
+    """Prefer one uninterrupted six-second speech span over a long, mixed recording."""
+    candidates = silence_boundaries(audio)
+    if not candidates:
+        raise RuntimeError("参考音频没有检测到可用语音。")
+    start, end = max(candidates, key=lambda item: item[1] - item[0])
+    duration = end - start
+    if duration < MIN_REFERENCE_SECONDS:
+        raise RuntimeError(f"参考音频缺少至少 {MIN_REFERENCE_SECONDS:.0f} 秒连续人声，请换一段更清晰的语音。")
+    selected = min(TARGET_REFERENCE_SECONDS, duration)
+    # Long uninterrupted speech is equally useful throughout. Centering avoids
+    # capture clicks and the natural inhale/exhale commonly found at the edges.
+    offset = max(0.0, (duration - selected) / 2)
+    return start + offset, selected
+
+
+def cut_reference_audio(source: Path, target: Path, start: float, duration: float) -> None:
+    run_ffmpeg(
+        ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(target)],
+        "Could not extract the selected speech segment",
+    )
+
+
+def waveform_metrics(audio: Path) -> dict[str, float]:
+    import soundfile as sf
+
+    samples, sample_rate = sf.read(str(audio), dtype="float32", always_2d=False)
+    waveform = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if sample_rate != 16000 or not waveform.size or not np.isfinite(waveform).all():
+        raise RuntimeError("参考音频不是有效的 16k 单声道波形。")
+    peak = float(np.max(np.abs(waveform)))
+    rms = float(np.sqrt(np.mean(np.square(waveform))))
+    return {
+        "duration": float(waveform.size / sample_rate),
+        "peak": peak,
+        "rmsDb": 20 * math.log10(max(rms, 1e-8)),
+        "voicedRatio": float(np.mean(np.abs(waveform) >= 0.012)),
+        "clippingRatio": float(np.mean(np.abs(waveform) >= 0.995)),
+    }
+
+
+def normalize_reference_audio(audio: Path) -> None:
+    import soundfile as sf
+
+    samples, sample_rate = sf.read(str(audio), dtype="float32", always_2d=False)
+    waveform = np.asarray(samples, dtype=np.float32).reshape(-1)
+    peak = float(np.max(np.abs(waveform)))
+    if peak > 0:
+        waveform *= min(1.0, 0.89 / peak)
+    sf.write(str(audio), waveform, sample_rate, format="WAV", subtype="PCM_16")
+
+
+def assess_reference_audio(audio: Path) -> dict:
+    metrics = waveform_metrics(audio)
+    level_score = max(0.0, 1.0 - abs(metrics["rmsDb"] + 20.0) / 28.0)
+    score = 0.35 * min(1.0, metrics["duration"] / MIN_REFERENCE_SECONDS) + 0.35 * min(1.0, metrics["voicedRatio"] / 0.65) + 0.2 * level_score + 0.1 * max(0.0, 1.0 - metrics["clippingRatio"] * 50.0)
+    quality = {**metrics, "score": round(score, 3), "passed": score >= MIN_REFERENCE_QUALITY_SCORE}
+    if not quality["passed"]:
+        raise RuntimeError(f"参考音频质量未达标（{quality['score']:.2f}/{MIN_REFERENCE_QUALITY_SCORE:.2f}）：需要清晰、连续且不过曝的人声。")
+    return quality
+
+
+def build_speaker_embedding(prompt_wav: Path) -> dict[str, float | int]:
+    """Validate a role in the same official runtime that will synthesize it."""
+    return run_cosyvoice_worker(["speaker", "--model-dir", str(cosyvoice_model()), "--reference", str(prompt_wav)])
+
+
+def normalized_text(value: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff]", "", value).lower()
+
+
+def text_similarity(expected: str, actual: str) -> float:
+    """Bidirectional character similarity rejects both omissions and garbage insertions."""
+    target = normalized_text(expected)
+    observed = normalized_text(actual)
+    if not target or not observed:
+        return 0.0
+    return SequenceMatcher(None, target, observed).ratio()
+
+
+def transcribe_for_quality(model_id: str, audio: Path) -> str:
+    entries, _, _, _ = transcribe_whisper(model_id, audio, "auto") if model_id in WHISPER_MODELS else transcribe_qwen(model_id, audio, "auto")
+    return "".join(entry["text"] for entry in entries)
+
+
+def verify_spoken_text(model_id: str, audio: Path, expected: str, stage: str) -> dict[str, float | str]:
+    actual = transcribe_for_quality(model_id, audio)
+    fidelity = text_similarity(expected, actual)
+    if fidelity < MIN_TEXT_FIDELITY:
+        raise RuntimeError(f"{stage} 文本回读未通过（{fidelity:.2f}/{MIN_TEXT_FIDELITY:.2f}），未交付该声音结果。")
+    return {"fidelity": round(fidelity, 3), "transcript": actual}
 
 
 def probe_duration(path: Path) -> float:
@@ -349,7 +543,7 @@ def transcribe_qwen(model_id: str, audio: Path, language: str) -> tuple[list, st
 
 def transcribe(model_id: str, language: str, source_relative: str, stem_relative: str) -> None:
     current = state(model_root())
-    if not current["ready"] or model_id not in ASR_MODELS or model_id not in current["asr"]["installed"]:
+    if model_id not in ASR_MODELS or model_id not in current["asr"]["installed"]:
         emit({"ready": False, "error": current["error"] or f"Model {model_id} has not been installed."}, 1)
     source = safe_file(source_relative)
     stem = safe_file(stem_relative)
@@ -383,82 +577,75 @@ def transcribe(model_id: str, language: str, source_relative: str, stem_relative
 
 def prepare_character(model_id: str, source_relative: str, stem_relative: str) -> None:
     current = state(model_root())
-    if not current["ready"] or model_id not in ASR_MODELS or model_id not in current["asr"]["installed"]:
+    if model_id not in ASR_MODELS or model_id not in current["asr"]["installed"] or not current["tts"]["ready"]:
         emit({"ready": False, "error": current["error"] or f"Model {model_id} has not been installed."}, 1)
     source = safe_file(source_relative)
     stem = safe_file(stem_relative)
     stem.parent.mkdir(parents=True, exist_ok=True)
     wav = stem.with_suffix(".wav")
-    print("[audio] 正在准备 16k 参考音频。", flush=True)
-    extract_audio(source, wav)
-    duration = probe_duration(wav)
-    if duration > MAX_REFERENCE_SECONDS:
-        print(f"[audio] 参考音频 {duration:.1f}s 超过 30 秒，已裁剪到前 30 秒。", flush=True)
-        trimmed = stem.with_name(stem.name + ".trim.wav")
-        result = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-t", "30", "-c:a", "pcm_s16le", str(trimmed)], capture_output=True, text=True)
-        if result.returncode:
-            raise RuntimeError(f"Could not trim reference audio: {result.stderr.strip()}")
-        wav.unlink(missing_ok=True)
-        trimmed.replace(wav)
-        duration = 30.0
-    print(f"[audio] 正在用 {model_id} 转写参考音，生成角色提示词。", flush=True)
+    prepared = stem.with_name(stem.name + ".prepared.wav")
+    try:
+        print("[audio] 正在预处理参考音频。", flush=True)
+        preprocess_reference_audio(source, prepared)
+        start, duration = select_best_speech_segment(prepared)
+        print(f"[audio] 已选取 {duration:.1f} 秒连续人声作为角色样本。", flush=True)
+        cut_reference_audio(prepared, wav, start, duration)
+    finally:
+        prepared.unlink(missing_ok=True)
+    normalize_reference_audio(wav)
+    quality = assess_reference_audio(wav)
+    print(f"[audio] 参考音质已通过（评分 {quality['score']:.2f}）。", flush=True)
+    print("[audio] 正在验证 CosyVoice 声纹。", flush=True)
+    speaker = build_speaker_embedding(wav)
+    print(f"[audio] 声纹已通过（{speaker['dimensions']} 维）。", flush=True)
+    print(f"[audio] 正在用 {model_id} 转写已选角色样本，生成零样本提示词。", flush=True)
     entries, detected_language, _, _ = transcribe_whisper(model_id, wav, "auto") if model_id in WHISPER_MODELS else transcribe_qwen(model_id, wav, "auto")
     prompt_text = "".join(entry["text"] for entry in entries)
-    meta = {"wav": str(wav.relative_to(files_root())), "promptText": prompt_text, "duration": round(duration, 3), "language": detected_language}
+    if len(prompt_text) < 4:
+        raise RuntimeError("角色样本的转写内容过短，无法建立可靠的声音角色。")
+    calibration = wav.with_name("calibration.wav")
+    try:
+        print("[audio] 正在校准声音角色朗读质量。", flush=True)
+        run_cosyvoice_worker(["synthesize", "--model-dir", str(cosyvoice_model()), "--reference", str(wav), "--prompt-text", prompt_text, "--text", prompt_text, "--output", str(calibration)])
+        calibration_result = verify_spoken_text(model_id, calibration, prompt_text, "声音角色校准")
+    finally:
+        calibration.unlink(missing_ok=True)
+    meta = {"wav": str(wav.relative_to(files_root())), "promptText": prompt_text, "duration": round(duration, 3), "language": detected_language, "quality": quality, "speaker": speaker, "calibration": calibration_result}
     Path(str(wav) + ".meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[audio] 角色参考音已就绪（{duration:.1f}s）。", flush=True)
     emit({"ready": True, **meta})
 
 
-def synthesize(text: str, reference_relative: str, prompt_text: str, style: str, output_relative: str) -> None:
+def synthesize(text: str, reference_relative: str, prompt_text: str, style: str, output_relative: str, default_voice: bool = False) -> None:
     current = state(model_root())
-    if not current["ready"]:
-        emit(current, 1)
+    if not current["tts"]["ready"]:
+        emit({"ready": False, "error": current["error"] or "CosyVoice 运行环境未就绪。"}, 1)
+    if DEFAULT_VERIFICATION_MODEL not in current["asr"]["installed"]:
+        emit({"ready": False, "error": "缺少 Qwen3-ASR 0.6B，无法执行合成后文本回读验收。"}, 1)
     repository = cosyvoice_repo()
     model_dir = cosyvoice_model()
     if not current["tts"]["ready"]:
         emit({"ready": False, "error": "CosyVoice 运行环境未就绪：请先安装官方仓库（含 Matcha-TTS 子模块）并下载 CosyVoice2-0.5B 权重。"}, 1)
-    reference = safe_file(reference_relative)
+    reference = repository / DEFAULT_PROMPT_AUDIO if default_voice else safe_file(reference_relative)
+    prompt_text = DEFAULT_PROMPT_TEXT if default_voice else prompt_text
+    if not reference.is_file() or not prompt_text:
+        raise RuntimeError("声音角色参考音或提示词不可用。")
     output = safe_file(output_relative)
     output.parent.mkdir(parents=True, exist_ok=True)
-    sys.path.insert(0, str(repository))
-    matcha = repository / "third_party" / "Matcha-TTS"
-    if matcha.is_dir():
-        sys.path.insert(0, str(matcha))
-    import whisper_shim
-
-    whisper_shim.install_whisper()
-    whisper_shim.install_modelscope()
     try:
         print("[audio] 正在加载 CosyVoice2 模型（首次加载较慢）。", flush=True)
-        from cosyvoice.cli.cosyvoice import CosyVoice2
-        from cosyvoice.utils.file_utils import load_wav
-
-        import torch
-        import torchaudio
-
-        engine = CosyVoice2(str(model_dir), load_jit=False, load_trt=False, fp16=False)
-        sample_rate = engine.sample_rate
-        prompt_wav = load_wav(str(reference), 16000)
-        instruct_text = STYLES.get(style, "")
-        if instruct_text:
-            print(f"[audio] 使用情绪指令：{instruct_text}", flush=True)
-            generator = engine.inference_instruct2(text, instruct_text, prompt_wav)
-        else:
-            generator = engine.inference_zero_shot(text, prompt_text, prompt_wav)
-        chunks = []
-        for chunk in generator:
-            chunks.append(chunk["tts_speech"].cpu())
-        if not chunks:
-            raise RuntimeError("synthesis produced no audio")
-        speech = torch.cat(chunks, dim=1)
-        torchaudio.save(str(output), speech, sample_rate, encoding="PCM_S", bits_per_sample=16)
-        duration = float(speech.shape[1]) / sample_rate
-        meta = {"wav": str(output.relative_to(files_root())), "duration": round(duration, 3), "sampleRate": int(sample_rate), "style": style}
+        voice_label = "CosyVoice 官方默认声音" if default_voice else "经验证声音角色"
+        print(f"[audio] 使用{voice_label}：{style} 风格。", flush=True)
+        rendered = run_cosyvoice_worker(["synthesize", "--model-dir", str(model_dir), "--reference", str(reference), "--prompt-text", prompt_text, "--text", text, "--output", str(output)])
+        print("[audio] 正在用 Qwen3-ASR 回读合成结果。", flush=True)
+        verification = verify_spoken_text(DEFAULT_VERIFICATION_MODEL, output, text, "合成输出")
+        meta = {"wav": str(output.relative_to(files_root())), "duration": rendered["duration"], "sampleRate": rendered["sampleRate"], "style": style, "verification": verification}
         Path(str(output) + ".meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[audio] 合成完成：{duration:.1f} 秒。", flush=True)
+        print(f"[audio] 合成与回读验收完成：{meta['duration']:.1f} 秒，保真度 {verification['fidelity']:.2f}。", flush=True)
         emit({"ready": True, **meta})
     except Exception as error:
+        output.unlink(missing_ok=True)
+        Path(str(output) + ".meta.json").unlink(missing_ok=True)
         emit({"ready": False, "error": str(error)}, 1)
 
 
@@ -480,8 +667,9 @@ def main() -> None:
     character_parser.add_argument("--output", required=True)
     synthesize_parser = commands.add_parser("synthesize")
     synthesize_parser.add_argument("--text", required=True)
-    synthesize_parser.add_argument("--reference", required=True)
+    synthesize_parser.add_argument("--reference", default="")
     synthesize_parser.add_argument("--prompt-text", default="")
+    synthesize_parser.add_argument("--default-voice", action="store_true")
     synthesize_parser.add_argument("--style", choices=list(STYLES), default="neutral")
     synthesize_parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -495,7 +683,7 @@ def main() -> None:
         elif args.command == "character":
             prepare_character(args.model, args.input, args.output)
         elif args.command == "synthesize":
-            synthesize(args.text, args.reference, args.prompt_text, args.style, args.output)
+            synthesize(args.text, args.reference, args.prompt_text, args.style, args.output, args.default_voice)
     except SystemExit:
         raise
     except Exception as error:
