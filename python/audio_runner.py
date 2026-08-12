@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 [INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、主 ASR venv、CosyVoice 专属官方 venv、模型权重与 FFmpeg
-[OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备与合成进度；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、经连续语音/波形/声纹验收的 16k 角色参考音与合成 wav
+[OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备与合成进度，并在底层模型静默时每 8 秒输出心跳；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、经连续语音/波形/声纹验收的 16k 角色参考音与合成 wav
 [POS]: audio-studio 的本地执行入口；实现 VoiceCloneEngine 的参考音预处理、片段筛选、质量验收和合成后 ASR 回读；CosyVoice 推理通过专属 worker 隔离版本冲突，不写入素材库
 [PROTOCOL]: 变更时更新此头部，然后检查 README.md
 """
@@ -14,9 +14,12 @@ import json
 import math
 import os
 import re
+import queue
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -82,6 +85,32 @@ def safe_file(relative: str) -> Path:
 def emit(payload: dict, code: int = 0) -> None:
     print(json.dumps(payload, ensure_ascii=True))
     raise SystemExit(code)
+
+
+def run_with_heartbeat(label: str, action):
+    """Make long model loading and inference visibly alive without changing their work."""
+    started = time.monotonic()
+    stopped = threading.Event()
+
+    def pulse() -> None:
+        while not stopped.wait(8):
+            elapsed = int(time.monotonic() - started)
+            print(f"[audio] {label}仍在进行（已等待 {elapsed}s）。", flush=True)
+
+    print(f"[audio] {label}。", flush=True)
+    heartbeat = threading.Thread(target=pulse, daemon=True)
+    heartbeat.start()
+    completed = False
+    try:
+        result = action()
+        completed = True
+        return result
+    finally:
+        stopped.set()
+        heartbeat.join(timeout=0.1)
+        elapsed = int(time.monotonic() - started)
+        outcome = "完成" if completed else "已中止"
+        print(f"[audio] {label}{outcome}（耗时 {elapsed}s）。", flush=True)
 
 
 def display_size(size: float) -> str:
@@ -209,14 +238,14 @@ def cosyvoice_runner() -> Path:
     return Path(__file__).with_name("tts_runner.py")
 
 
-def parse_worker_result(result: subprocess.CompletedProcess[str]) -> dict:
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith("{")]
-    if not lines:
-        detail = (result.stderr or result.stdout).strip()
+def parse_worker_result(lines: list[str], return_code: int) -> dict:
+    payloads = [line.strip() for line in lines if line.strip().startswith("{")]
+    if not payloads:
+        detail = "".join(lines).strip()
         raise RuntimeError(detail or "CosyVoice worker did not return a result.")
-    payload = json.loads(lines[-1])
-    if result.returncode or not payload.get("ready"):
-        raise RuntimeError(str(payload.get("error") or result.stderr or "CosyVoice worker failed."))
+    payload = json.loads(payloads[-1])
+    if return_code or not payload.get("ready"):
+        raise RuntimeError(str(payload.get("error") or "CosyVoice worker failed."))
     return payload
 
 
@@ -224,11 +253,44 @@ def run_cosyvoice_worker(args: list[str]) -> dict:
     python = cosyvoice_python()
     if not python.is_file():
         raise RuntimeError("CosyVoice 专属运行环境未就绪，请重新准备声音工坊运行环境。")
-    result = subprocess.run([str(python), str(cosyvoice_runner()), *args], capture_output=True, text=True)
-    for line in result.stdout.splitlines():
+    task = "正在提取 CosyVoice 声纹" if args[0] == "speaker" else "正在由 CosyVoice 合成语音"
+    print(f"[audio] {task} worker 已启动。", flush=True)
+    process = subprocess.Popen(
+        [str(python), str(cosyvoice_runner()), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    output: list[str] = []
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def relay() -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=relay, daemon=True).start()
+    started = time.monotonic()
+    closed = False
+    while not closed:
+        try:
+            line = lines.get(timeout=8)
+        except queue.Empty:
+            elapsed = int(time.monotonic() - started)
+            print(f"[audio] {task}仍在进行（已等待 {elapsed}s，模型正在计算）。", flush=True)
+            continue
+        if line is None:
+            closed = True
+            continue
+        output.append(line)
         if not line.lstrip().startswith("{"):
-            print(line, flush=True)
-    return parse_worker_result(result)
+            print(line.rstrip(), flush=True)
+    return_code = process.wait()
+    elapsed = int(time.monotonic() - started)
+    print(f"[audio] {task} worker 已结束（耗时 {elapsed}s）。", flush=True)
+    return parse_worker_result(output, return_code)
 
 
 def cosyvoice_runtime_status() -> dict:
@@ -237,7 +299,7 @@ def cosyvoice_runtime_status() -> dict:
         return {"ready": False, "error": "CosyVoice 专属运行环境未就绪。"}
     result = subprocess.run([str(python), str(cosyvoice_runner()), "status"], capture_output=True, text=True)
     try:
-        payload = parse_worker_result(result)
+        payload = parse_worker_result(result.stdout.splitlines(keepends=True) + result.stderr.splitlines(keepends=True), result.returncode)
     except RuntimeError as error:
         return {"ready": False, "error": str(error)}
     return {"ready": True, "versions": payload.get("versions", {})}
@@ -404,8 +466,10 @@ def transcribe_for_quality(model_id: str, audio: Path) -> str:
 
 
 def verify_spoken_text(model_id: str, audio: Path, expected: str, stage: str) -> dict[str, float | str]:
+    print(f"[audio] {stage}：准备回读 {len(normalized_text(expected))} 个有效字符。", flush=True)
     actual = transcribe_for_quality(model_id, audio)
     fidelity = text_similarity(expected, actual)
+    print(f"[audio] {stage}：回读完成，保真度 {fidelity:.2f}。", flush=True)
     if fidelity < MIN_TEXT_FIDELITY:
         raise RuntimeError(f"{stage} 文本回读未通过（{fidelity:.2f}/{MIN_TEXT_FIDELITY:.2f}），未交付该声音结果。")
     return {"fidelity": round(fidelity, 3), "transcript": actual}
@@ -530,8 +594,8 @@ def transcribe_whisper(model_id: str, audio: Path, language: str) -> tuple[list,
 
 def transcribe_qwen(model_id: str, audio: Path, language: str) -> tuple[list, str, float, float]:
     duration = probe_duration(audio)
-    qwen = load_qwen(model_id)
-    results = qwen.transcribe(audio=str(audio), language=QWEN_LANGUAGE_MAP[language], return_time_stamps=True)
+    qwen = run_with_heartbeat(f"正在加载 {model_id} 模型", lambda: load_qwen(model_id))
+    results = run_with_heartbeat(f"{model_id} 正在识别 {duration:.1f} 秒音频", lambda: qwen.transcribe(audio=str(audio), language=QWEN_LANGUAGE_MAP[language], return_time_stamps=True))
     if not results:
         raise RuntimeError("Qwen 未返回转写结果。")
     result = results[0]
@@ -633,11 +697,11 @@ def synthesize(text: str, reference_relative: str, prompt_text: str, style: str,
     output = safe_file(output_relative)
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        print("[audio] 正在加载 CosyVoice2 模型（首次加载较慢）。", flush=True)
+        print("[audio] 正在启动 CosyVoice2 专属 worker（首次加载较慢）。", flush=True)
         voice_label = "CosyVoice 官方默认声音" if default_voice else "经验证声音角色"
         print(f"[audio] 使用{voice_label}：{style} 风格。", flush=True)
         rendered = run_cosyvoice_worker(["synthesize", "--model-dir", str(model_dir), "--reference", str(reference), "--prompt-text", prompt_text, "--text", text, "--output", str(output)])
-        print("[audio] 正在用 Qwen3-ASR 回读合成结果。", flush=True)
+        print("[audio] WAV 已生成，开始单次 Qwen3-ASR 回读验收。", flush=True)
         verification = verify_spoken_text(DEFAULT_VERIFICATION_MODEL, output, text, "合成输出")
         meta = {"wav": str(output.relative_to(files_root())), "duration": rendered["duration"], "sampleRate": rendered["sampleRate"], "style": style, "verification": verification}
         Path(str(output) + ".meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

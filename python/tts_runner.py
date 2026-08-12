@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 [INPUT]: 读取 RECUT_MODELS_DIR、CosyVoice 官方仓库、CosyVoice2-0.5B 权重与本目录 whisper_shim。
-[OUTPUT]: 对外提供 CosyVoice 专属运行时状态、声纹提取和零样本 WAV 合成，末行输出单行 JSON。
+[OUTPUT]: 对外提供 CosyVoice 专属运行时状态、声纹提取和零样本 WAV 合成，持续输出模型加载/推理阶段日志，末行输出单行 JSON。
 [POS]: audio-studio/python 的隔离 TTS worker；由 audio_runner 调用，绝不导入 Qwen3-ASR 或 App SQLite。
 [PROTOCOL]: 变更时更新此头部，然后检查 README.md
 """
@@ -49,6 +49,7 @@ def runtime_status() -> dict:
 
 def load_engine(model_dir: Path):
     repository = model_dir.parent.parent / "repository"
+    print("[audio] CosyVoice worker：正在准备官方代码与兼容层。", flush=True)
     runner_dir = str(Path(__file__).resolve().parent)
     for path in (runner_dir, str(repository), str(repository / "third_party" / "Matcha-TTS")):
         if path not in sys.path:
@@ -61,13 +62,17 @@ def load_engine(model_dir: Path):
     from cosyvoice.cli.cosyvoice import CosyVoice2
     from cosyvoice.utils.file_utils import load_wav
 
-    return CosyVoice2(str(model_dir), load_jit=False, load_trt=False, fp16=False), load_wav
+    print("[audio] CosyVoice worker：正在加载模型权重与声学组件。", flush=True)
+    engine = CosyVoice2(str(model_dir), load_jit=False, load_trt=False, fp16=False)
+    print(f"[audio] CosyVoice worker：模型已就绪（{engine.sample_rate} Hz）。", flush=True)
+    return engine, load_wav
 
 
 def speaker(model_dir: Path, reference: Path) -> None:
     import torch
 
     engine, load_wav = load_engine(model_dir)
+    print("[audio] CosyVoice worker：正在读取参考音并提取声纹。", flush=True)
     embedding = engine.frontend._extract_spk_embedding(load_wav(str(reference), 16000))
     if not embedding.numel() or not bool(torch.isfinite(embedding).all()):
         emit({"ready": False, "error": "CosyVoice 无法从参考音提取有效声纹。"}, 1)
@@ -82,15 +87,22 @@ def synthesize(model_dir: Path, text: str, prompt_text: str, reference: Path, ou
     import torch
 
     engine, load_wav = load_engine(model_dir)
+    print("[audio] CosyVoice worker：正在编码参考音与提示词。", flush=True)
     prompt_wav = load_wav(str(reference), 16000)
-    chunks = [chunk["tts_speech"].cpu() for chunk in engine.inference_zero_shot(text, prompt_text, prompt_wav)]
+    print(f"[audio] CosyVoice worker：开始推理，共 {len(text)} 个文本字符。", flush=True)
+    chunks = []
+    for index, chunk in enumerate(engine.inference_zero_shot(text, prompt_text, prompt_wav), start=1):
+        chunks.append(chunk["tts_speech"].cpu())
+        print(f"[audio] CosyVoice worker：已收到第 {index} 个语音分片。", flush=True)
     if not chunks:
         emit({"ready": False, "error": "CosyVoice 没有返回音频。"}, 1)
     speech = torch.cat(chunks, dim=1)
     if not torch.isfinite(speech).all() or float(speech.abs().max()) < 0.002:
         emit({"ready": False, "error": "合成输出未通过波形质量检查。"}, 1)
     output.parent.mkdir(parents=True, exist_ok=True)
+    print("[audio] CosyVoice worker：正在写入 WAV。", flush=True)
     sf.write(str(output), speech.squeeze(0).numpy(), engine.sample_rate, format="WAV", subtype="PCM_16")
+    print("[audio] CosyVoice worker：WAV 写入完成。", flush=True)
     emit({"ready": True, "duration": round(float(speech.shape[1]) / engine.sample_rate, 3), "sampleRate": int(engine.sample_rate)})
 
 

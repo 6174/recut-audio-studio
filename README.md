@@ -43,7 +43,7 @@ ui/ -> background.js -> ctx.python / ctx.shell -> ShellJobManager -> python/audi
 用户点击保存 -> ctx.media.importFile -> 素材库 Asset
 ```
 
-`background.js` 是唯一业务入口。它把模型下载源持久化在 App SQLite，把素材库输入 materialize 到私有目录、提交 Python Job、保存转写 / 角色 / 合成记录，并在 App SQLite 保留一个活动任务及其持久化日志；界面重连后通过 `audio.job` 恢复，任务可以由 `audio.cancel` 停止，只有处理完终态才以 `audio.resolve` 清除。记录以任务终态驱动：只有成功生成、波形有效且 ASR 回读文本保真度达标的 WAV 进入历史。转写文稿以 `segments: [{ start, end, text, speaker, emotion }]` 结构保存，SRT 只是导出展示格式；声音角色由 VoiceCloneEngine 生成：预处理参考音、选出 3~6 秒连续语音、归一化、验收波形和 CosyVoice 声纹，再以一次“合成->ASR 回读”校准，只有带完整验收记录的角色能进入 TTS。未选择角色时，合成固定使用 CosyVoice 仓库随附的 `zero_shot_prompt.wav` 及其官方对应文本；选择角色时才使用角色的短样本和对应转写。`python/audio_runner.py` 负责状态、下载、转写、策略和验收，`python/tts_runner.py` 在官方锁定的独立 TTS venv 中加载 CosyVoice，`python/whisper_shim.py` 只在该 worker 的加载期注入兼容边界。
+`background.js` 是唯一业务入口。它把模型下载源持久化在 App SQLite，把素材库输入 materialize 到私有目录、提交 Python Job、保存转写 / 角色 / 合成记录，并在 App SQLite 保留一个活动任务及其持久化日志；界面重连后通过 `audio.job` 恢复，任务可以由 `audio.cancel` 停止，只有处理完终态才以 `audio.resolve` 清除。CosyVoice worker 的加载、参考音编码、推理分片和 WAV 写入会实时转发；若底层模型连续 8 秒无输出，主 worker 会持续输出运行心跳，因此界面不会把正常计算误判为卡死。记录以任务终态驱动：只有成功生成、波形有效且在生成完成后经一次 ASR 回读、文本保真度达标的 WAV 进入历史。转写文稿以 `segments: [{ start, end, text, speaker, emotion }]` 结构保存，SRT 只是导出展示格式；声音角色由 VoiceCloneEngine 生成：预处理参考音、选出 3~6 秒连续语音、归一化、验收波形和 CosyVoice 声纹，再以一次“合成->ASR 回读”校准，只有带完整验收记录的角色能进入 TTS。未选择角色时，合成固定使用 CosyVoice 仓库随附的 `zero_shot_prompt.wav` 及其官方对应文本；选择角色时才使用角色的短样本和对应转写。`python/audio_runner.py` 负责状态、下载、转写、策略和验收，`python/tts_runner.py` 在官方锁定的独立 TTS venv 中加载 CosyVoice，`python/whisper_shim.py` 只在该 worker 的加载期注入兼容边界。
 
 ## 开发
 
