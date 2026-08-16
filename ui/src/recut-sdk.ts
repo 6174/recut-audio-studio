@@ -1,10 +1,25 @@
 /**
  * [INPUT]: 依赖宿主注入的 MessageChannel 与独立 App workspace scope
- * [OUTPUT]: 对外提供 App operation、平台素材选择与右侧 Agent 输入回填（compose，仅填输入框绝不自动提交）的 iframe SDK
+ * [OUTPUT]: 对外提供 App operation、平台素材选择与右侧 Agent 输入回填（compose，仅填输入框绝不自动提交）的 iframe SDK；另导出 UI 语言（locale）读取与 React hook
  * [POS]: ui/src 的宿主通信边界；组件不直接读写 App SQLite 或执行本机命令，Agent 内容必须经全局 chat 可见
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
+import { useState } from "react";
+
 type RequestType = "state.query" | "background.call" | "agent.compose" | "media.pick";
+
+export type Locale = "zh" | "en";
+
+export function getRecutLocale(): Locale {
+  const fromURL = new URLSearchParams(location.search).get("locale");
+  if (fromURL === "zh" || fromURL === "en") return fromURL;
+  return (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+export function useRecutLocale(): Locale {
+  const [locale] = useState<Locale>(getRecutLocale);
+  return locale;
+}
 let port: MessagePort | null = null;
 let sequence = 0;
 const pending = new Map<string, { resolve: (value: any) => void; reject: (reason: Error) => void }>();

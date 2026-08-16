@@ -25,6 +25,13 @@ const RECORD_TABLES = {
 function value(input, name) { return String(input[name] || "").trim(); }
 function outputID() { return `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 
+// 平台通过 ctx.locale 提供 "zh" 或 "en"，其余情况回退中文。
+function locale(ctx) { return String(ctx?.locale || "").toLowerCase() === "en" ? "en" : "zh"; }
+function tr(ctx, zh, en) { return locale(ctx) === "en" ? en : zh; }
+// TODO(i18n): 剩余仍为英文的校验/状态文案（如 "assetId, kind, model and language are required"、
+// "Audio transcript was not found."、"kind must be transcript, synthesis or character" 等）已在
+// 平台与界面层表现为英文；如需随 ctx.locale 双语，后续在此统一收敛为 tr(ctx, ...)。
+
 function ensureSchema(ctx) {
   ctx.sqlite.execute("create table if not exists audio_transcripts (id text primary key, source_asset_id text not null, source_kind text not null, model text not null, language text not null, srt_path text not null, json_path text not null, audio_path text not null default '', saved_asset_id text not null default '', duration real not null default 0, created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
   ctx.sqlite.execute("create table if not exists audio_characters (id text primary key, name text not null, model text not null, sample_path text not null, sample_asset_id text not null default '', prompt_text text not null default '', created_at text not null, job_id text not null default '', status text not null default 'queued', error text not null default '')");
@@ -53,12 +60,12 @@ function setDownloadSource(ctx, source) {
   ctx.sqlite.execute("insert into audio_settings (key, value) values ('download_source', ?) on conflict(key) do update set value = excluded.value", [source]);
 }
 
-function parseProcess(result) {
+function parseProcess(result, ctx) {
   const lines = String(result.stdout || "").trim().split("\n").filter(Boolean);
   const last = lines[lines.length - 1] || "{}";
   let payload;
-  try { payload = JSON.parse(last); } catch (_) { payload = { ready: false, error: String(result.stdout || result.error || "Python did not return a status payload.") }; }
-  if (Number(result.exitCode) !== 0) payload.error = payload.error || String(result.stdout || result.error || "Python process failed.");
+  try { payload = JSON.parse(last); } catch (_) { payload = { ready: false, error: String(result.stdout || result.error || tr(ctx, "Python 未返回状态数据。", "Python did not return a status payload.")) }; }
+  if (Number(result.exitCode) !== 0) payload.error = payload.error || String(result.stdout || result.error || tr(ctx, "Python 进程执行失败。", "Python process failed."));
   return payload;
 }
 
@@ -68,7 +75,7 @@ function run(ctx, args, timeoutSeconds) {
   // 同步状态检查与异步推理由此共享同一套 qwen-asr 依赖。
   // ------------------------------
   const shell = '"$RECUT_PYTHON" python/audio_runner.py "$@"';
-  return parseProcess(ctx.shell.exec({ command: "sh", args: ["-eu", "-c", shell, "audio-runner", ...args], environment: "audio-studio", timeoutSeconds }));
+  return parseProcess(ctx.shell.exec({ command: "sh", args: ["-eu", "-c", shell, "audio-runner", ...args], environment: "audio-studio", timeoutSeconds }), ctx);
 }
 
 function shellJobID(job) { return String(job.id || job.ID || "").trim(); }
@@ -105,14 +112,14 @@ function trackedJob(ctx) {
   try { job = ctx.shell.status(record.job_id); }
   catch (error) {
     const message = error instanceof Error ? error.message : "shell job is unavailable";
-    const interrupted = { status: "interrupted", error: `任务记录不可恢复：${message}` };
+    const interrupted = { status: "interrupted", error: tr(ctx, `任务记录不可恢复：${message}`, `Task record cannot be recovered: ${message}`) };
     settleOutput(ctx, record.action, record.record_id, interrupted);
     noteEnvOutcome(ctx, record, interrupted, []);
     return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
   }
   const status = shellJobStatus(job);
   if (!isActiveJob(status) && !isTerminalJob(status)) {
-    const interrupted = { status: "interrupted", error: `任务状态不可识别：${status || "empty"}` };
+    const interrupted = { status: "interrupted", error: tr(ctx, `任务状态不可识别：${status || "empty"}`, `Task status unrecognized: ${status || "empty"}`) };
     settleOutput(ctx, record.action, record.record_id, interrupted);
     noteEnvOutcome(ctx, record, interrupted, []);
     return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
@@ -123,7 +130,7 @@ function trackedJob(ctx) {
 function ensureNoActiveJob(ctx) {
   ensureSchema(ctx);
   const existing = trackedJob(ctx);
-  if (existing && isActiveJob(existing.status)) throw new Error("声音工坊已有任务正在执行，请等待完成或先取消。");
+  if (existing && isActiveJob(existing.status)) throw new Error(tr(ctx, "声音工坊已有任务正在执行，请等待完成或先取消。", "Audio Studio already has a task running; wait for it to finish or cancel it first."));
   if (existing) ctx.sqlite.execute("update audio_jobs set resolved_at = ? where job_id = ?", [new Date().toISOString(), existing.id]);
 }
 
@@ -144,9 +151,9 @@ function markFailed(ctx, action, recordID, error) {
   ctx.sqlite.execute(`update ${table} set status = 'failed', error = ? where id = ?`, [error instanceof Error ? error.message : String(error), recordID]);
 }
 
-function meaningfulError(logs, fallback) {
+function meaningfulError(ctx, logs, fallback) {
   const lines = (logs || []).map((entry) => String(entry.text || "")).map((line) => line.trim()).filter(Boolean);
-  return lines[lines.length - 1] || fallback || "未知错误";
+  return lines[lines.length - 1] || fallback || tr(ctx, "未知错误", "Unknown error");
 }
 
 function envErrorRow(ctx) {
@@ -171,7 +178,7 @@ function noteEnvOutcome(ctx, record, job, logs = []) {
   if (!isTerminalJob(job.status)) return;
   if (job.status === "completed") { clearEnvError(ctx); return; }
   const tail = (logs || []).slice(-40);
-  storeEnvError(ctx, record.action, record.job_id, meaningfulError(tail, job.error), tail);
+  storeEnvError(ctx, record.action, record.job_id, meaningfulError(ctx, tail, job.error), tail);
 }
 
 function status(_, ctx) {
@@ -187,7 +194,7 @@ function status(_, ctx) {
   if (!environment.ready) {
     return {
       ready: false, pending: true, modelsRoot: "~/.recut/models/audio-studio",
-      error: envFailure ? `运行环境准备失败：${envFailure.setupError}` : environment.error || "Python 运行环境尚未就绪。",
+      error: envFailure ? tr(ctx, `运行环境准备失败：${envFailure.setupError}`, `Runtime setup failed: ${envFailure.setupError}`) : environment.error || tr(ctx, "Python 运行环境尚未就绪。", "The Python runtime is not ready yet."),
       asr: { installed: [] }, tts: { ready: false }, downloadSource: downloadSource(ctx), activeJob,
       ...(envFailure || {}),
     };
@@ -199,9 +206,9 @@ function status(_, ctx) {
     if (envFailure) {
       result.setupError = envFailure.setupError;
       result.setupLogs = envFailure.setupLogs;
-      result.error = `运行环境准备失败：${envFailure.setupError}`;
+      result.error = tr(ctx, `运行环境准备失败：${envFailure.setupError}`, `Runtime setup failed: ${envFailure.setupError}`);
     } else {
-      result.setupError = runner.error || "运行环境检查未通过。";
+      result.setupError = runner.error || tr(ctx, "运行环境检查未通过。", "The runtime check failed.");
       result.setupLogs = [];
     }
   }
@@ -260,7 +267,7 @@ function transcriptRecord(ctx, row) {
     record.jsonURL = ctx.files.url(row.json_path);
     if (row.audio_path) record.audioURL = ctx.files.url(row.audio_path);
   } catch (error) {
-    ctx.sqlite.execute("update audio_transcripts set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : "转写文件已丢失。", row.id]);
+    ctx.sqlite.execute("update audio_transcripts set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : tr(ctx, "转写文件已丢失。", "Transcript files are missing."), row.id]);
     return null;
   }
   return record;
@@ -315,7 +322,7 @@ function characterRecord(ctx, row) {
   const record = { id: row.id, name: row.name, model: row.model, promptText: row.prompt_text, sampleAssetId: row.sample_asset_id, createdAt: row.created_at, sampleURL: "" };
   try { record.sampleURL = ctx.files.url(row.sample_path); }
   catch (error) {
-    ctx.sqlite.execute("update audio_characters set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : "角色参考音已丢失。", row.id]);
+    ctx.sqlite.execute("update audio_characters set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : tr(ctx, "角色参考音已丢失。", "The character reference audio is missing."), row.id]);
     return null;
   }
   return record;
@@ -340,8 +347,9 @@ function characterComplete(input, ctx) {
     row.prompt_text = meta.promptText;
   }
   if (row.status === "completed" && !characterQuality(ctx, row)) {
-    ctx.sqlite.execute("update audio_characters set status = 'failed', error = '声音角色未通过参考音、声纹或朗读回读验收，请重新创建。' where id = ?", [id]);
-    return { id: row.id, status: "failed", error: "声音角色未通过参考音、声纹或朗读回读验收，请重新创建。" };
+    const qualityError = tr(ctx, "声音角色未通过参考音、声纹或朗读回读验收，请重新创建。", "The voice character did not pass the reference, voiceprint or read-back verification. Please create it again.");
+    ctx.sqlite.execute("update audio_characters set status = 'failed', error = ? where id = ?", [qualityError, id]);
+    return { id: row.id, status: "failed", error: qualityError };
   }
   const record = characterRecord(ctx, row);
   if (!record) throw new Error("Audio character sample is missing.");
@@ -360,7 +368,7 @@ function characterRemove(input, ctx) {
   const rows = ctx.sqlite.query("select id from audio_characters where id = ?", [id]);
   if (!rows.length) throw new Error("Audio character was not found.");
   ctx.sqlite.execute("delete from audio_characters where id = ?", [id]);
-  ctx.sqlite.execute("update audio_syntheses set status = 'failed', error = '声音角色已删除。' where character_id = ? and status = 'queued'", [id]);
+  ctx.sqlite.execute("update audio_syntheses set status = 'failed', error = ? where character_id = ? and status = 'queued'", [tr(ctx, "声音角色已删除。", "The voice character was removed."), id]);
   return { id, removed: true };
 }
 
@@ -398,7 +406,7 @@ function synthesisRecord(ctx, row) {
   const record = { id: row.id, characterId: row.character_id, text: row.text, style: row.style, savedAssetId: row.saved_asset_id, createdAt: row.created_at, outputURL: "", duration: 0 };
   try { record.outputURL = ctx.files.url(row.output_path); }
   catch (error) {
-    ctx.sqlite.execute("update audio_syntheses set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : "合成音频已丢失。", row.id]);
+    ctx.sqlite.execute("update audio_syntheses set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : tr(ctx, "合成音频已丢失。", "The synthesized audio is missing."), row.id]);
     return null;
   }
   const meta = readJSON(ctx, `${row.output_path}.meta.json`);
@@ -433,7 +441,7 @@ function save(input, ctx) {
     const rows = ctx.sqlite.query("select id, source_asset_id, srt_path, json_path, audio_path, model, language, duration, saved_asset_id from audio_transcripts where id = ? and status = 'completed'", [id]);
     if (!rows.length) throw new Error("Audio transcript was not found.");
     const record = rows[0];
-    if (!record.audio_path) throw new Error("该转写没有保留源声音轨，无法保存为转写素材，请重新转写。");
+    if (!record.audio_path) throw new Error(tr(ctx, "该转写没有保留源声音轨，无法保存为转写素材，请重新转写。", "This transcript has no source audio track, so it can't be saved as a transcript asset. Please transcribe again."));
     if (!record.saved_asset_id) {
       const asset = ctx.media.importTranscript({
         name: `transcript-${record.id}.wav`,

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 Recut SDK、声音工坊 operation、平台素材选择器、素材库上传 HTTP、shadcn/ui 组件与 React 状态
  * [OUTPUT]: 对外提供三步声音工作流导航、会话级配音草稿、Download Source、Whisper/Qwen/CosyVoice 模型下载、转写文稿与 SRT、转写保存为素材库 bundle、声音角色创建/试听/删除、角色配音合成与试听，以及历史小卡片点击后在共享详情预览中操作、实时计时/日志、任务停止和用户确认入库工作台
- * [POS]: audio-studio UI 编排层；仅在环境和选定模型就绪后开放推理，生成结果先留在 App 私有文件区
+ * [POS]: audio-studio UI 编排层；仅在环境和选定模型就绪后开放推理，生成结果先留在 App 私有文件区；UI 用户可见文案经 i18n.ts 随 locale 切换
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 import { createRoot } from "react-dom/client";
@@ -16,37 +16,38 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { recut } from "./recut-sdk";
+import { recut, useRecutLocale, type Locale } from "./recut-sdk";
+import { t, tF, type I18nKey } from "./i18n";
 import type { ActiveAudioJob, DownloadSource, Language, MediaAsset, RuntimeStatus, ShellJob, ShellJobLog, SpeechModel, Synthesis, TranscriptDetail, TranscriptSegment, TranscriptSummary, VoiceCharacter, VoiceStyle } from "./types";
 import "./index.css";
 
 type Tab = "transcribe" | "characters" | "synthesize";
 
-const speechModels: { id: SpeechModel; label: string; note: string }[] = [
-  { id: "qwen3-asr-0.6b", label: "Qwen3 ASR 0.6B", note: "Qwen，高精度与速度平衡（推荐）" },
-  { id: "qwen3-asr-1.7b", label: "Qwen3 ASR 1.7B", note: "Qwen，最高识别质量，需要更多内存" },
-  { id: "whisper-small", label: "Whisper Small", note: "最快，适合快速预览" },
-  { id: "whisper-medium", label: "Whisper Medium", note: "质量与速度平衡" },
-  { id: "whisper-large-v3", label: "Whisper Large-v3", note: "高精度，更慢" },
+const speechModels: { id: SpeechModel; label: string; noteKey: I18nKey }[] = [
+  { id: "qwen3-asr-0.6b", label: "Qwen3 ASR 0.6B", noteKey: "model.qwen3-0.6b.note" },
+  { id: "qwen3-asr-1.7b", label: "Qwen3 ASR 1.7B", noteKey: "model.qwen3-1.7b.note" },
+  { id: "whisper-small", label: "Whisper Small", noteKey: "model.whisper-small.note" },
+  { id: "whisper-medium", label: "Whisper Medium", noteKey: "model.whisper-medium.note" },
+  { id: "whisper-large-v3", label: "Whisper Large-v3", noteKey: "model.whisper-large-v3.note" },
 ];
 
-const downloadSources: { id: DownloadSource; label: string; note: string }[] = [
-  { id: "automatic", label: "自动", note: "优先 Hugging Face，不可用时切换 ModelScope" },
-  { id: "huggingface", label: "Hugging Face", note: "官方全球源" },
-  { id: "modelscope", label: "ModelScope", note: "中国大陆访问通常更稳定" },
+const downloadSources: { id: DownloadSource; labelKey: I18nKey; noteKey: I18nKey }[] = [
+  { id: "automatic", labelKey: "downloadSource.automatic", noteKey: "downloadSource.automatic.note" },
+  { id: "huggingface", labelKey: "downloadSource.huggingface", noteKey: "downloadSource.huggingface.note" },
+  { id: "modelscope", labelKey: "downloadSource.modelscope", noteKey: "downloadSource.modelscope.note" },
 ];
 
-const languages: { id: Language; label: string }[] = [
-  { id: "auto", label: "自动检测" },
-  { id: "zh", label: "中文" },
-  { id: "en", label: "英文" },
+const languages: { id: Language; labelKey: I18nKey }[] = [
+  { id: "auto", labelKey: "language.auto" },
+  { id: "zh", labelKey: "language.zh" },
+  { id: "en", labelKey: "language.en" },
 ];
 
-const styles: { id: VoiceStyle; label: string; note: string }[] = [
-  { id: "neutral", label: "中性", note: "自然陈述" },
-  { id: "calm", label: "平静", note: "舒缓放松" },
-  { id: "excited", label: "兴奋", note: "热情上扬" },
-  { id: "gentle", label: "温柔", note: "柔和亲切" },
+const styles: { id: VoiceStyle; labelKey: I18nKey; noteKey: I18nKey }[] = [
+  { id: "neutral", labelKey: "style.neutral", noteKey: "style.neutral.note" },
+  { id: "calm", labelKey: "style.calm", noteKey: "style.calm.note" },
+  { id: "excited", labelKey: "style.excited", noteKey: "style.excited.note" },
+  { id: "gentle", labelKey: "style.gentle", noteKey: "style.gentle.note" },
 ];
 
 type ActiveJob = { id: string; action: ActiveAudioJob["action"]; recordID?: string; startedAt: number; status: ShellJob["status"]; error?: string };
@@ -61,7 +62,7 @@ function readSynthesisDraft(): SynthesisDraft {
     return {
       text: typeof draft.text === "string" ? draft.text : "",
       characterId: typeof draft.characterId === "string" ? draft.characterId : "",
-      style: styles.some((item) => item.id === draft.style) ? draft.style : "neutral",
+      style: draft.style && styles.some((item) => item.id === draft.style) ? draft.style : "neutral",
     };
   } catch (_) { return { text: "", characterId: "", style: "neutral" }; }
 }
@@ -81,10 +82,14 @@ function formatTimecode(seconds: number) { const milliseconds = Math.max(0, Math
 function buildSRT(segments: TranscriptSegment[]) { return segments.map((segment, index) => `${index + 1}\n${formatTimecode(segment.start)} --> ${formatTimecode(segment.end)}\n${segment.text}`).join("\n\n") + "\n"; }
 async function copyText(text: string) { try { await navigator.clipboard.writeText(text); return true; } catch (_) { return false; } }
 function downloadBlob(name: string, content: string, mimeType: string) { const blob = new Blob([content], { type: mimeType }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url); }
-function downloadFile(name: string, url: string) { const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); }
-function timestamp(createdAt: string) { return new Date(createdAt).toLocaleString("zh-CN"); }
+function timestamp(locale: Locale, createdAt: string) { return new Date(createdAt).toLocaleString(locale === "zh" ? "zh-CN" : "en-US"); }
+function kindLabel(locale: Locale, kind: string) { return kind === "audio" ? t(locale, "kind.audio") : kind === "video" ? t(locale, "kind.video") : kind; }
+function languageLabel(locale: Locale, language: string) { return language === "auto" ? t(locale, "language.auto") : language === "zh" ? t(locale, "language.zh") : language === "en" ? t(locale, "language.en") : language; }
+function styleLabel(locale: Locale, style: string) { const item = styles.find((entry) => entry.id === style); return item ? t(locale, item.labelKey) : style; }
 
 function App() {
+  const locale = useRecutLocale();
+  useEffect(() => { document.documentElement.lang = locale === "zh" ? "zh-CN" : "en"; }, [locale]);
   const [initialSynthesisDraft] = useState(readSynthesisDraft);
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [transcripts, setTranscripts] = useState<TranscriptSummary[]>([]);
@@ -105,7 +110,7 @@ function App() {
   const [synthesisCharacterId, setSynthesisCharacterId] = useState(initialSynthesisDraft.characterId);
   const [style, setStyle] = useState<VoiceStyle>(initialSynthesisDraft.style);
   const [busy, setBusy] = useState<"prepare" | "install" | "transcribe" | "character" | "synthesize" | "save" | "upload" | "agent" | null>(null);
-  const [message, setMessage] = useState("正在启动…");
+  const [message, setMessage] = useState(() => t(locale, "msg.starting"));
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
   const [logs, setLogs] = useState<ShellJobLog[]>([]);
   const [bottomTab, setBottomTab] = useState<"history" | "logs">("history");
@@ -127,7 +132,7 @@ function App() {
       const nextStatus = await recut.state.query("audio.status") as RuntimeStatus;
       setStatus(nextStatus);
       if (nextStatus.downloadSource) setDownloadSource(nextStatus.downloadSource);
-      setMessage(nextStatus.activeJob && isValidActiveJob(nextStatus.activeJob) ? "本地任务正在执行。" : nextStatus.ready ? "运行环境就绪，请开始使用。" : nextStatus.setupError ? `运行环境准备失败：${nextStatus.setupError}` : "正在启动…");
+      setMessage(nextStatus.activeJob && isValidActiveJob(nextStatus.activeJob) ? t(locale, "msg.jobRunning") : nextStatus.ready ? t(locale, "msg.ready") : nextStatus.setupError ? tF(locale, "msg.setupFailed", { error: nextStatus.setupError }) : t(locale, "msg.starting"));
       try {
         const [nextTranscripts, nextCharacters, nextSyntheses] = await Promise.all([
           recut.state.query("audio.transcripts") as Promise<TranscriptSummary[]>,
@@ -135,19 +140,19 @@ function App() {
           recut.state.query("audio.syntheses") as Promise<Synthesis[]>,
         ]);
         setTranscripts(nextTranscripts); setCharacters(nextCharacters); setSyntheses(nextSyntheses);
-      } catch (error) { setMessage(error instanceof Error ? error.message : "无法读取历史输出。"); }
+      } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.readHistoryFailed")); }
       return nextStatus;
-    } catch (error) { setMessage(error instanceof Error ? error.message : "无法读取声音工坊状态。"); }
+    } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.readStatusFailed")); }
     return null;
-  }, []);
+  }, [locale]);
 
   const loadAssets = useCallback(async (): Promise<MediaAsset[]> => {
     const response = await fetch("/v1/media/assets");
-    if (!response.ok) throw new Error("无法读取素材库。");
+    if (!response.ok) throw new Error(t(locale, "msg.readLibraryFailed"));
     const next = await response.json() as MediaAsset[];
     const completed = next.filter((asset) => asset.status === "completed" && (asset.kind === "audio" || asset.kind === "video"));
     setAssets(completed); return completed;
-  }, []);
+  }, [locale]);
 
   const restoreJob = useCallback((job: ActiveAudioJob) => {
     if (!isValidActiveJob(job)) return;
@@ -178,9 +183,9 @@ function App() {
   }, [activeJob]);
   useEffect(() => {
     if (!activeJob || isTerminal(activeJob.status)) return;
-    const timer = window.setInterval(() => { void syncJob().catch((error) => setMessage(error instanceof Error ? error.message : "无法同步本地任务。")); }, 1000);
+    const timer = window.setInterval(() => { void syncJob().catch((error) => setMessage(error instanceof Error ? error.message : t(locale, "msg.syncJobFailed"))); }, 1000);
     return () => window.clearInterval(timer);
-  }, [activeJob, syncJob]);
+  }, [activeJob, syncJob, locale]);
   useEffect(() => recut.events.subscribe((raw) => {
     const event = raw as { type?: string; log?: ShellJobLog; job?: ShellJob };
     if (event.type === "shell.job.log" && event.log?.jobId === activeJob?.id) setLogs((items) => mergeLogs(items, [event.log as ShellJobLog]));
@@ -194,33 +199,33 @@ function App() {
     try {
       if (job.status !== "completed") {
         const tail = [...logsRef.current].reverse().map((entry) => entry.text.trim()).find(Boolean);
-        const error = tail || job.error || "本地任务未完成。";
+        const error = tail || job.error || t(locale, "msg.taskIncomplete");
         setFailure(error); setMessage(error);
       } else if (job.action === "transcribe" && job.recordID) {
         const detail = await recut.background.call("audio.transcript", { id: job.recordID }) as TranscriptDetail;
-        setCurrentTranscript(detail); setMessage("转写完成，文稿与字幕已生成，尚未进入素材库。");
+        setCurrentTranscript(detail); setMessage(t(locale, "msg.transcribeDone"));
       } else if (job.action === "character" && job.recordID) {
         await recut.background.call("audio.character.complete", { id: job.recordID });
-        setMessage("声音角色已创建。");
+        setMessage(t(locale, "msg.characterCreated"));
       } else if (job.action === "synthesize" && job.recordID) {
         const synthesis = await recut.background.call("audio.synthesis.complete", { id: job.recordID }) as Synthesis;
-        setSelectedSynthesis(synthesis); setMessage("配音已生成，尚未进入素材库。");
+        setSelectedSynthesis(synthesis); setMessage(t(locale, "msg.synthesisDone"));
       } else {
         const nextStatus = await refresh();
         if (!nextStatus?.ready) {
-          const error = nextStatus?.error || "运行环境检查尚未完成，请重新尝试。";
+          const error = nextStatus?.error || t(locale, "msg.envCheckPending");
           setFailure(error); setMessage(error); return;
         }
-        setMessage(job.action === "prepare" ? "运行环境已就绪。" : "模型下载完成，可以开始使用。");
+        setMessage(job.action === "prepare" ? t(locale, "msg.envReady") : t(locale, "msg.modelInstalled"));
       }
-    } catch (error) { const message = error instanceof Error ? error.message : "任务完成后无法刷新状态。"; setFailure(message); setMessage(message); }
+    } catch (error) { const message = error instanceof Error ? error.message : t(locale, "msg.refreshFailed"); setFailure(message); setMessage(message); }
     finally {
       try { await recut.background.call("audio.resolve", { id: job.id }); }
-      catch (error) { setMessage(error instanceof Error ? error.message : "无法确认任务终态。"); }
+      catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.resolveFailed")); }
       setBusy(null); setActiveJob((current) => current?.id === job.id ? null : current); finalizingJob.current = null;
       void refresh();
     }
-  }, [refresh]);
+  }, [refresh, locale]);
   useEffect(() => { if (activeJob && isTerminal(activeJob.status)) void finishJob(activeJob); }, [activeJob, finishJob]);
 
   const compatibleAssets = useMemo(() => assets.filter((asset) => asset.kind === sourceKind), [assets, sourceKind]);
@@ -232,54 +237,54 @@ function App() {
   const beginJob = (job: ShellJob, action: ActiveJob["action"], recordID?: string) => {
     setElapsedSeconds(0);
     setActiveJob({ id: job.id, action, recordID, startedAt: jobStartedAt(job.startedAt), status: job.status, error: job.error });
-    void syncJob().catch((error) => setMessage(error instanceof Error ? error.message : "无法读取本地任务日志。"));
+    void syncJob().catch((error) => setMessage(error instanceof Error ? error.message : t(locale, "msg.jobLogFailed")));
   };
 
   const installSpeechModel = async () => {
     setBusy("install"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage(`正在下载 ${speechModels.find((item) => item.id === model)?.label} 模型…`);
+    setMessage(tF(locale, "msg.downloadingModel", { name: speechModels.find((item) => item.id === model)?.label ?? model }));
     try { const result = await recut.background.call("audio.install", { model, source: downloadSource }) as { job: ShellJob }; beginJob(result.job, "install"); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "安装失败。"); setBusy(null); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.installFailed")); setBusy(null); }
   };
 
   const installCosyVoice = async () => {
     setBusy("install"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage("正在下载 CosyVoice2-0.5B 权重（约 2.7GB）…");
+    setMessage(t(locale, "msg.downloadingCosyVoice"));
     try { const result = await recut.background.call("audio.install", { model: "cosyvoice2", source: downloadSource }) as { job: ShellJob }; beginJob(result.job, "install"); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "安装失败。"); setBusy(null); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.installFailed")); setBusy(null); }
   };
 
   const prepare = useCallback(async () => {
     setBusy("prepare"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage("正在启动…");
+    setMessage(t(locale, "msg.starting"));
     try { const result = await recut.background.call("audio.prepare") as { job: ShellJob }; beginJob(result.job, "prepare"); }
-    catch (error) { const message = error instanceof Error ? error.message : "暂时无法启动。"; setFailure(message); setMessage(message); setBusy(null); }
-  }, []);
+    catch (error) { const message = error instanceof Error ? error.message : t(locale, "msg.startFailed"); setFailure(message); setMessage(message); setBusy(null); }
+  }, [locale]);
 
   const transcribeSource = async () => {
-    if (!assetId) return setMessage("先选择一个音频或视频素材。");
+    if (!assetId) return setMessage(t(locale, "msg.pickSourceFirst"));
     setBusy("transcribe"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage(sourceKind === "video" ? "正在抽取音轨并转写，视频会花更长时间。" : "正在转写…");
+    setMessage(sourceKind === "video" ? t(locale, "msg.extractingVideo") : t(locale, "msg.transcribing"));
     try { const result = await recut.background.call("audio.transcribe", { assetId, kind: sourceKind, model, language }) as { job: ShellJob; transcript: { id: string } }; beginJob(result.job, "transcribe", result.transcript.id); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "转写失败。"); setBusy(null); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.transcribeFailed")); setBusy(null); }
   };
 
   const createCharacter = async () => {
-    if (!characterAssetId) return setMessage("先选择一段参考人声音频。");
-    if (!characterName.trim()) return setMessage("给声音角色起一个名字。");
+    if (!characterAssetId) return setMessage(t(locale, "msg.pickReferenceFirst"));
+    if (!characterName.trim()) return setMessage(t(locale, "msg.nameCharacter"));
     setBusy("character"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage("正在抽取参考音并生成角色提示词…");
+    setMessage(t(locale, "msg.creatingCharacter"));
     try { const result = await recut.background.call("audio.character.create", { assetId: characterAssetId, name: characterName.trim(), model }) as { job: ShellJob; character: { id: string } }; beginJob(result.job, "character", result.character.id); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "创建角色失败。"); setBusy(null); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.characterFailed")); setBusy(null); }
   };
 
   const synthesizeVoice = async () => {
-    if (!synthesisText.trim()) return setMessage("先输入要朗读的文本。");
+    if (!synthesisText.trim()) return setMessage(t(locale, "msg.enterText"));
     saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, style });
     setBusy("synthesize"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage("正在合成配音…");
+    setMessage(t(locale, "msg.synthesizing"));
     try { const result = await recut.background.call("audio.synthesize", { ...(synthesisCharacterId ? { characterId: synthesisCharacterId } : {}), text: synthesisText, style }) as { job: ShellJob; synthesis: { id: string } }; beginJob(result.job, "synthesize", result.synthesis.id); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "合成失败。"); setBusy(null); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.synthesisFailed")); setBusy(null); }
   };
 
   const cancel = async () => {
@@ -287,9 +292,9 @@ function App() {
     setCancelling(true);
     try {
       const result = await recut.background.call("audio.cancel") as { cancelled: boolean };
-      setMessage(result.cancelled ? "正在停止本地任务…" : "没有可停止的本地任务。");
+      setMessage(result.cancelled ? t(locale, "msg.stoppingTask") : t(locale, "msg.noTaskToStop"));
       void syncJob();
-    } catch (error) { setMessage(error instanceof Error ? error.message : "无法停止本地任务。"); }
+    } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.stopFailed")); }
     finally { setCancelling(false); }
   };
 
@@ -298,8 +303,8 @@ function App() {
       const selected = await recut.media.pick(kinds) as MediaAsset | null;
       if (!selected) return;
       setAssets((items) => items.some((asset) => asset.id === selected.id) ? items : [selected, ...items]);
-      setSelectedAsset(selected); setAssetId(selected.id); setMessage(`已选择${selected.kind === "audio" ? "音频" : "视频"}素材：${selected.name}`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : "无法打开素材选择器。"); }
+      setSelectedAsset(selected); setAssetId(selected.id); setMessage(tF(locale, "msg.pickedSource", { kind: kindLabel(locale, selected.kind), name: selected.name }));
+    } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.pickerFailed")); }
   };
 
   const chooseCharacterSource = async () => {
@@ -307,53 +312,53 @@ function App() {
       const selected = await recut.media.pick(["audio"]) as MediaAsset | null;
       if (!selected) return;
       setAssets((items) => items.some((asset) => asset.id === selected.id) ? items : [selected, ...items]);
-      setCharacterAsset(selected); setCharacterAssetId(selected.id); setMessage(`已选择参考人声：${selected.name}`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : "无法打开素材选择器。"); }
+      setCharacterAsset(selected); setCharacterAssetId(selected.id); setMessage(tF(locale, "msg.pickedReference", { name: selected.name }));
+    } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.pickerFailed")); }
   };
 
   const upload = async (file: File | undefined, kind: "source" | "character") => {
     if (!file) return;
-    if (!file.type.startsWith("audio/")) return setMessage("请上传音频文件。");
+    if (!file.type.startsWith("audio/")) return setMessage(t(locale, "msg.uploadAudioOnly"));
     setBusy("upload");
     try {
       const form = new FormData(); form.append("file", file);
       const response = await fetch("/v1/media/assets", { method: "POST", body: form });
       const payload = await response.json().catch(() => ({})) as { id?: string; error?: string };
-      if (!response.ok || !payload.id) throw new Error(payload.error || "上传失败。");
+      if (!response.ok || !payload.id) throw new Error(payload.error || t(locale, "msg.uploadFailed"));
       const nextAssets = await loadAssets();
       const selected = nextAssets.find((asset) => asset.id === payload.id) ?? { id: payload.id, name: file.name, kind: "audio", mimeType: file.type, status: "completed" };
       if (kind === "character") { setCharacterAsset(selected); setCharacterAssetId(payload.id); }
       else { setSelectedAsset(selected); setAssetId(payload.id); setSourceKind("audio"); }
-      setMessage("输入素材已加入素材库并选中。");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "上传失败。"); }
+      setMessage(t(locale, "msg.uploadedSelected"));
+    } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.uploadFailed")); }
     finally { setBusy(null); }
   };
 
   const saveTranscript = async (transcript: Pick<TranscriptSummary, "id">) => {
     setBusy("save");
-    try { const result = await recut.background.call("audio.save", { id: transcript.id, kind: "transcript" }) as { assetId: string }; setTranscripts((items) => items.map((item) => item.id === transcript.id ? { ...item, savedAssetId: result.assetId } : item)); setCurrentTranscript((current) => current && current.id === transcript.id ? { ...current, savedAssetId: result.assetId } : current); setHistoryPreview((current) => current?.kind === "transcript" && current.item.id === transcript.id ? { ...current, item: { ...current.item, savedAssetId: result.assetId } } : current); setMessage("转写文稿已保存为素材库的转写素材。"); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "保存失败。"); }
+    try { const result = await recut.background.call("audio.save", { id: transcript.id, kind: "transcript" }) as { assetId: string }; setTranscripts((items) => items.map((item) => item.id === transcript.id ? { ...item, savedAssetId: result.assetId } : item)); setCurrentTranscript((current) => current && current.id === transcript.id ? { ...current, savedAssetId: result.assetId } : current); setHistoryPreview((current) => current?.kind === "transcript" && current.item.id === transcript.id ? { ...current, item: { ...current.item, savedAssetId: result.assetId } } : current); setMessage(t(locale, "msg.transcriptSaved")); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.saveFailed")); }
     finally { setBusy(null); }
   };
 
   const saveSynthesis = async (synthesis: Synthesis) => {
     setBusy("save");
-    try { const result = await recut.background.call("audio.save", { id: synthesis.id, kind: "synthesis" }) as { assetId: string }; setSyntheses((items) => items.map((item) => item.id === synthesis.id ? { ...item, savedAssetId: result.assetId } : item)); setHistoryPreview((current) => current?.kind === "synthesis" && current.item.id === synthesis.id ? { ...current, item: { ...current.item, savedAssetId: result.assetId } } : current); setMessage("配音已保存到素材库。"); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "保存失败。"); }
+    try { const result = await recut.background.call("audio.save", { id: synthesis.id, kind: "synthesis" }) as { assetId: string }; setSyntheses((items) => items.map((item) => item.id === synthesis.id ? { ...item, savedAssetId: result.assetId } : item)); setHistoryPreview((current) => current?.kind === "synthesis" && current.item.id === synthesis.id ? { ...current, item: { ...current.item, savedAssetId: result.assetId } } : current); setMessage(t(locale, "msg.synthesisSaved")); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.saveFailed")); }
     finally { setBusy(null); }
   };
 
   const saveCharacter = async (character: VoiceCharacter) => {
     setBusy("save");
-    try { const result = await recut.background.call("audio.save", { id: character.id, kind: "character" }) as { assetId: string }; setCharacters((items) => items.map((item) => item.id === character.id ? { ...item, sampleAssetId: result.assetId } : item)); setHistoryPreview((current) => current?.kind === "character" && current.item.id === character.id ? { ...current, item: { ...current.item, sampleAssetId: result.assetId } } : current); setMessage("角色参考音已保存到素材库。"); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "保存失败。"); }
+    try { const result = await recut.background.call("audio.save", { id: character.id, kind: "character" }) as { assetId: string }; setCharacters((items) => items.map((item) => item.id === character.id ? { ...item, sampleAssetId: result.assetId } : item)); setHistoryPreview((current) => current?.kind === "character" && current.item.id === character.id ? { ...current, item: { ...current.item, sampleAssetId: result.assetId } } : current); setMessage(t(locale, "msg.characterSampleSaved")); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.saveFailed")); }
     finally { setBusy(null); }
   };
 
   const removeCharacter = async (character: VoiceCharacter) => {
     setBusy("save");
-    try { await recut.background.call("audio.character.remove", { id: character.id }); setCharacters((items) => items.filter((item) => item.id !== character.id)); setSynthesisCharacterId((current) => current === character.id ? "" : current); setMessage("声音角色已删除。"); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "删除失败。"); }
+    try { await recut.background.call("audio.character.remove", { id: character.id }); setCharacters((items) => items.filter((item) => item.id !== character.id)); setSynthesisCharacterId((current) => current === character.id ? "" : current); setMessage(t(locale, "msg.characterRemoved")); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.removeFailed")); }
     finally { setBusy(null); }
   };
 
@@ -361,9 +366,9 @@ function App() {
     setBusy("agent");
     const details = (status?.setupLogs ?? []).map((entry) => entry.text).join("").slice(-2000);
     const context = status?.setupError || status?.error || message;
-    const pythonHint = status?.pythonVersion ? `\n当前 venv 使用 Python ${status.pythonVersion}。` : "";
-    try { await recut.agent.compose(`声音工坊本地依赖检查或安装失败。请检查并解决这个错误，然后告诉我可以如何继续。\n错误：${context}${pythonHint}\n日志：\n${details || "（无日志）"}`); setMessage("诊断已填入右侧 Agent 输入框；请确认后发送。"); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "无法准备诊断请求。"); }
+    const pythonHint = status?.pythonVersion ? tF(locale, "agent.pythonHint", { version: status.pythonVersion }) : "";
+    try { await recut.agent.compose(tF(locale, "agent.prompt", { error: context, pythonHint, logs: details || t(locale, "agent.noLogs") })); setMessage(t(locale, "msg.agentDiagnosisFilled")); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.agentDiagnosisFailed")); }
     finally { setBusy(null); }
   };
 
@@ -374,7 +379,7 @@ function App() {
 
   const openHistoryTranscript = async (id: string) => {
     try { const detail = await recut.background.call("audio.transcript", { id }) as TranscriptDetail; setHistoryPreview({ kind: "transcript", item: detail }); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "无法打开历史转写。"); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.openHistoryFailed")); }
   };
 
   if (!status?.ready) return <Setup autoPrepare={status !== null} busy={busy} elapsedSeconds={elapsedSeconds} failure={status?.setupError || failure || (!status?.pending ? status?.error || "" : "")} failureLogs={status?.setupLogs ?? []} logs={logs} message={message} pythonVersion={status?.pythonVersion} onPrepare={() => void prepare()} onAskAgent={() => void askAgent()} />;
@@ -391,12 +396,12 @@ function App() {
 
   return <div className="mx-auto max-w-[1440px] p-6">
     <header className="flex flex-col gap-1 border-b pb-5">
-      <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">Recut App / 声音工坊</p>
+      <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "app.header")}</p>
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">声音工坊</h1>
-        <Badge variant="secondary" className="font-mono">工作区 App</Badge>
+        <h1 className="text-2xl font-semibold tracking-tight">{t(locale, "app.title")}</h1>
+        <Badge variant="secondary" className="font-mono">{t(locale, "app.badge")}</Badge>
       </div>
-      <p className="text-sm text-muted-foreground">转写、声音角色与角色配音。声音是视频的一级资源，输出先留在私有区，确认后再进素材库。</p>
+      <p className="text-sm text-muted-foreground">{t(locale, "app.subtitle")}</p>
     </header>
     <WorkflowNav tab={tab} onChange={(nextTab) => { setTab(nextTab); setBottomTab("history"); bottomTabSelectedByUser.current = true; }} />
     <main className="mt-4 grid items-start gap-4 min-[700px]:grid-cols-[minmax(280px,320px)_minmax(0,1fr)]">
@@ -409,17 +414,18 @@ function App() {
 }
 
 function WorkflowNav({ tab, onChange }: { tab: Tab; onChange: (tab: Tab) => void }) {
-  const workflows: { id: Tab; number: string; icon: ReactNode; label: string; note: string }[] = [
-    { id: "transcribe", number: "01", icon: <MessageSquareText className="size-4" />, label: "转写", note: "音视频 → 文稿与字幕" },
-    { id: "characters", number: "02", icon: <Mic className="size-4" />, label: "声音角色", note: "参考音 → 可复用角色" },
-    { id: "synthesize", number: "03", icon: <Sparkles className="size-4" />, label: "配音", note: "角色 + 文本 → 音频" },
+  const locale = useRecutLocale();
+  const workflows: { id: Tab; number: string; icon: ReactNode; labelKey: I18nKey; noteKey: I18nKey }[] = [
+    { id: "transcribe", number: "01", icon: <MessageSquareText className="size-4" />, labelKey: "nav.transcribe.label", noteKey: "nav.transcribe.note" },
+    { id: "characters", number: "02", icon: <Mic className="size-4" />, labelKey: "nav.characters.label", noteKey: "nav.characters.note" },
+    { id: "synthesize", number: "03", icon: <Sparkles className="size-4" />, labelKey: "nav.synthesize.label", noteKey: "nav.synthesize.note" },
   ];
   const activeIndex = workflows.findIndex((item) => item.id === tab);
-  return <nav aria-label="声音工作流" className="mt-4 rounded-lg border bg-card p-3 shadow-none">
+  return <nav aria-label={t(locale, "workflow.navLabel")} className="mt-4 rounded-lg border bg-card p-3 shadow-none">
     <div className="flex flex-wrap items-end justify-between gap-2 border-b pb-3">
       <div>
-        <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">工作流</p>
-        <h2 className="mt-0.5 text-sm font-semibold">选择你现在要处理的声音任务</h2>
+        <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "workflow.eyebrow")}</p>
+        <h2 className="mt-0.5 text-sm font-semibold">{t(locale, "workflow.heading")}</h2>
       </div>
       <span className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Step {String(activeIndex + 1).padStart(2, "0")} / 03</span>
     </div>
@@ -429,8 +435,8 @@ function WorkflowNav({ tab, onChange }: { tab: Tab; onChange: (tab: Tab) => void
         return <button aria-current={active ? "step" : undefined} aria-pressed={active} className={cn("group flex min-w-0 items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors", active ? "border-primary/60 bg-accent/70" : "border-transparent bg-muted/45 hover:border-border hover:bg-muted")} key={item.id} onClick={() => onChange(item.id)} type="button">
           <span className={cn("grid size-8 shrink-0 place-items-center rounded-full border font-mono text-[10px] font-semibold", active ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-muted-foreground")}>{active ? <Check className="size-3.5" /> : item.number}</span>
           <span className="grid min-w-0 gap-0.5">
-            <span className={cn("flex items-center gap-1.5 text-sm font-semibold", active ? "text-foreground" : "text-foreground/75")}>{item.icon}{item.label}</span>
-            <span className="truncate text-[11px] text-muted-foreground">{item.note}</span>
+            <span className={cn("flex items-center gap-1.5 text-sm font-semibold", active ? "text-foreground" : "text-foreground/75")}>{item.icon}{t(locale, item.labelKey)}</span>
+            <span className="truncate text-[11px] text-muted-foreground">{t(locale, item.noteKey)}</span>
           </span>
         </button>;
       })}
@@ -443,113 +449,121 @@ function ControlSection({ title, eyebrow, children }: { title: string; eyebrow: 
 }
 
 function ModelSelect({ disabled, model, onChange }: { disabled: boolean; model: SpeechModel; onChange: (value: SpeechModel) => void }) {
+  const locale = useRecutLocale();
   return <div className="grid gap-2">
-    <Label htmlFor="speech-model" className="text-xs text-muted-foreground">本地语音模型</Label>
+    <Label htmlFor="speech-model" className="text-xs text-muted-foreground">{t(locale, "modelSelect.label")}</Label>
     <Select disabled={disabled} onValueChange={(value) => onChange(value as SpeechModel)} value={model}>
-      <SelectTrigger id="speech-model" className="h-9 w-full min-w-0"><SelectValue placeholder="选择模型" /></SelectTrigger>
-      <SelectContent>{speechModels.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.note}</SelectItem>)}</SelectContent>
+      <SelectTrigger id="speech-model" className="h-9 w-full min-w-0"><SelectValue placeholder={t(locale, "modelSelect.placeholder")} /></SelectTrigger>
+      <SelectContent>{speechModels.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {t(locale, item.noteKey)}</SelectItem>)}</SelectContent>
     </Select>
   </div>;
 }
 
 function DownloadSourceSelect({ disabled, source, onChange }: { disabled: boolean; source: DownloadSource; onChange: (value: DownloadSource) => void }) {
+  const locale = useRecutLocale();
   const selected = downloadSources.find((item) => item.id === source);
   return <div className="grid gap-2">
-    <Label htmlFor="download-source" className="text-xs text-muted-foreground">下载来源</Label>
+    <Label htmlFor="download-source" className="text-xs text-muted-foreground">{t(locale, "downloadSource.label")}</Label>
     <Select disabled={disabled} onValueChange={(value) => onChange(value as DownloadSource)} value={source}>
-      <SelectTrigger id="download-source" className="h-9 w-full min-w-0"><SelectValue placeholder="选择下载来源" /></SelectTrigger>
-      <SelectContent>{downloadSources.map((item) => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}</SelectContent>
+      <SelectTrigger id="download-source" className="h-9 w-full min-w-0"><SelectValue placeholder={t(locale, "downloadSource.placeholder")} /></SelectTrigger>
+      <SelectContent>{downloadSources.map((item) => <SelectItem key={item.id} value={item.id}>{t(locale, item.labelKey)}</SelectItem>)}</SelectContent>
     </Select>
-    <p className="text-[11px] leading-relaxed text-muted-foreground">{selected?.note}</p>
+    {selected && <p className="text-[11px] leading-relaxed text-muted-foreground">{t(locale, selected.noteKey)}</p>}
   </div>;
 }
 
 function SourceButtons({ busy, onChoose, selectedLabel, onUpload }: { busy: boolean; onChoose: () => void; selectedLabel: string; onUpload: (file: File | undefined) => void }) {
+  const locale = useRecutLocale();
   return <div className="grid gap-2">
-    <Label className="text-xs text-muted-foreground">素材库</Label>
+    <Label className="text-xs text-muted-foreground">{t(locale, "library.label")}</Label>
     <Button disabled={busy} onClick={onChoose} type="button" variant="outline"><FolderOpen className="size-3.5" />{selectedLabel}</Button>
-    <Label className="relative inline-flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-md border bg-background px-2.5 text-xs font-medium shadow-xs transition-colors hover:bg-input/50 disabled:pointer-events-none disabled:opacity-50"><Upload className="size-3.5" />上传音频<input accept="audio/*" className="sr-only" disabled={busy} onChange={(event) => onUpload(event.target.files?.[0])} type="file" /></Label>
+    <Label className="relative inline-flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-md border bg-background px-2.5 text-xs font-medium shadow-xs transition-colors hover:bg-input/50 disabled:pointer-events-none disabled:opacity-50"><Upload className="size-3.5" />{t(locale, "upload.audio")}<input accept="audio/*" className="sr-only" disabled={busy} onChange={(event) => onUpload(event.target.files?.[0])} type="file" /></Label>
   </div>;
 }
 
 function TranscribeControls({ busy, downloadSource, language, model, readySpeechModel, setDownloadSource, setLanguage, setModel, sourceAsset, sourceKind, upload, onChoose, onRun, onInstall, onKindChange }: { busy: string | null; downloadSource: DownloadSource; language: Language; model: SpeechModel; readySpeechModel: boolean; setDownloadSource: (value: DownloadSource) => void; setLanguage: (value: Language) => void; setModel: (value: SpeechModel) => void; sourceAsset: MediaAsset | null; sourceKind: "audio" | "video"; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void; onKindChange: (kind: "audio" | "video") => void }) {
+  const locale = useRecutLocale();
   return <CardContent className="flex flex-col gap-6">
-    <ControlSection eyebrow="输入" title="选择音视频素材">
+    <ControlSection eyebrow={t(locale, "controls.input.eyebrow")} title={t(locale, "controls.input.sourceTitle")}>
       <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/50 p-1">
-        {(["audio", "video"] as ("audio" | "video")[]).map((kind) => <Button className={cn("gap-1.5", sourceKind === kind && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={kind} onClick={() => onKindChange(kind)} type="button" variant="ghost" size="sm">{kind === "audio" ? <AudioLines className="size-3.5" /> : <Video className="size-3.5" />}{kind === "audio" ? "音频" : "视频"}</Button>)}
+        {(["audio", "video"] as ("audio" | "video")[]).map((kind) => <Button className={cn("gap-1.5", sourceKind === kind && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={kind} onClick={() => onKindChange(kind)} type="button" variant="ghost" size="sm">{kind === "audio" ? <AudioLines className="size-3.5" /> : <Video className="size-3.5" />}{kindLabel(locale, kind)}</Button>)}
       </div>
-      <SourceButtons busy={busy !== null} onChoose={onChoose} onUpload={upload} selectedLabel={sourceAsset ? "更换素材" : `从素材库选择${sourceKind === "audio" ? "音频" : "视频"}`} />
+      <SourceButtons busy={busy !== null} onChoose={onChoose} onUpload={upload} selectedLabel={sourceAsset ? t(locale, "source.change") : tF(locale, "source.pick", { kind: kindLabel(locale, sourceKind) })} />
       {sourceAsset && <SelectedSource asset={sourceAsset} />}
     </ControlSection>
     <Separator />
-    <ControlSection eyebrow="模型" title="本地语音权重">
+    <ControlSection eyebrow={t(locale, "controls.model.eyebrow")} title={t(locale, "controls.model.weightsTitle")}>
       <ModelSelect disabled={busy !== null} model={model} onChange={setModel} />
       <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
-      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />已下载</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载此模型</Button>}
+      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "downloaded")}</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />{t(locale, "download.model")}</Button>}
     </ControlSection>
     <Separator />
-    <ControlSection eyebrow="语言" title="转写语言">
-      <div className="grid grid-cols-3 gap-1 rounded-md border bg-muted/50 p-1">{languages.map((item) => <Button className={cn(language === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setLanguage(item.id)} type="button" variant="ghost" size="sm">{item.label}</Button>)}</div>
+    <ControlSection eyebrow={t(locale, "controls.language.eyebrow")} title={t(locale, "controls.language.title")}>
+      <div className="grid grid-cols-3 gap-1 rounded-md border bg-muted/50 p-1">{languages.map((item) => <Button className={cn(language === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setLanguage(item.id)} type="button" variant="ghost" size="sm">{t(locale, item.labelKey)}</Button>)}</div>
     </ControlSection>
-    <Button disabled={busy !== null || !sourceAsset || !readySpeechModel} onClick={onRun} type="button" size="lg">{busy === "transcribe" ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquareText className="size-4" />}开始转写</Button>
+    <Button disabled={busy !== null || !sourceAsset || !readySpeechModel} onClick={onRun} type="button" size="lg">{busy === "transcribe" ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquareText className="size-4" />}{t(locale, "nav.transcribe.label")}</Button>
   </CardContent>;
 }
 
 function CharacterControls({ busy, characterAsset, characterName, downloadSource, model, readySpeechModel, setDownloadSource, setCharacterName, setModel, upload, onChoose, onRun, onInstall }: { busy: string | null; characterAsset: MediaAsset | null; characterName: string; downloadSource: DownloadSource; model: SpeechModel; readySpeechModel: boolean; setDownloadSource: (value: DownloadSource) => void; setCharacterName: (value: string) => void; setModel: (value: SpeechModel) => void; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void }) {
+  const locale = useRecutLocale();
   return <CardContent className="flex flex-col gap-6">
-    <ControlSection eyebrow="输入" title="创建声音角色">
-      <p className="text-xs leading-relaxed text-muted-foreground">用一段 5~15 秒干净人声创建可复用角色；超过 30 秒会被自动裁剪。</p>
-      <SourceButtons busy={busy !== null} onChoose={onChoose} onUpload={upload} selectedLabel={characterAsset ? "更换参考人声" : "从素材库选择人声音频"} />
+    <ControlSection eyebrow={t(locale, "controls.input.eyebrow")} title={t(locale, "controls.character.title")}>
+      <p className="text-xs leading-relaxed text-muted-foreground">{t(locale, "controls.character.desc")}</p>
+      <SourceButtons busy={busy !== null} onChoose={onChoose} onUpload={upload} selectedLabel={characterAsset ? t(locale, "source.character.change") : t(locale, "source.character.pick")} />
       {characterAsset && <SelectedSource asset={characterAsset} />}
       <div className="grid gap-2">
-        <Label htmlFor="character-name" className="text-xs text-muted-foreground">角色名称</Label>
-        <Input disabled={busy !== null} id="character-name" onChange={(event) => setCharacterName(event.target.value)} placeholder="例如：妈妈" value={characterName} />
+        <Label htmlFor="character-name" className="text-xs text-muted-foreground">{t(locale, "character.name.label")}</Label>
+        <Input disabled={busy !== null} id="character-name" onChange={(event) => setCharacterName(event.target.value)} placeholder={t(locale, "character.name.placeholder")} value={characterName} />
       </div>
     </ControlSection>
     <Separator />
-    <ControlSection eyebrow="模型" title="提示词语音模型">
+    <ControlSection eyebrow={t(locale, "controls.model.eyebrow")} title={t(locale, "controls.character.promptModelTitle")}>
       <ModelSelect disabled={busy !== null} model={model} onChange={setModel} />
       <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
-      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />已下载</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载此模型</Button>}
+      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "downloaded")}</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />{t(locale, "download.model")}</Button>}
     </ControlSection>
-    <Button disabled={busy !== null || !characterAsset || !characterName.trim() || !readySpeechModel} onClick={onRun} type="button" size="lg">{busy === "character" ? <LoaderCircle className="size-4 animate-spin" /> : <Mic className="size-4" />}创建声音角色</Button>
+    <Button disabled={busy !== null || !characterAsset || !characterName.trim() || !readySpeechModel} onClick={onRun} type="button" size="lg">{busy === "character" ? <LoaderCircle className="size-4 animate-spin" /> : <Mic className="size-4" />}{t(locale, "controls.character.title")}</Button>
   </CardContent>;
 }
 
 function SynthesizeControls({ busy, characters, downloadSource, setDownloadSource, setSynthesisCharacterId, setSynthesisText, setStyle, style, synthesisCharacterId, synthesisText, ttsReady, onRun, onInstall }: { busy: string | null; characters: VoiceCharacter[]; downloadSource: DownloadSource; setDownloadSource: (value: DownloadSource) => void; setSynthesisCharacterId: (value: string) => void; setSynthesisText: (value: string) => void; setStyle: (value: VoiceStyle) => void; style: VoiceStyle; synthesisCharacterId: string; synthesisText: string; ttsReady: boolean; onRun: () => void; onInstall: () => void }) {
+  const locale = useRecutLocale();
   return <CardContent className="flex flex-col gap-6">
-    <ControlSection eyebrow="文本" title="要朗读的内容">
-      <Textarea aria-label="要朗读的文本" disabled={busy !== null} onChange={(event) => setSynthesisText(event.target.value)} placeholder="例如：欢迎来到我的频道，今天我们学习 AI。" rows={5} value={synthesisText} />
+    <ControlSection eyebrow={t(locale, "controls.text.eyebrow")} title={t(locale, "controls.text.title")}>
+      <Textarea aria-label={t(locale, "controls.text.title")} disabled={busy !== null} onChange={(event) => setSynthesisText(event.target.value)} placeholder={t(locale, "controls.text.placeholder")} rows={5} value={synthesisText} />
     </ControlSection>
     <Separator />
-    <ControlSection eyebrow="声音" title="选择声音角色">
+    <ControlSection eyebrow={t(locale, "controls.voice.eyebrow")} title={t(locale, "controls.voice.title")}>
       <div className="grid max-h-52 gap-1 overflow-auto pr-1">
-        <button aria-pressed={!synthesisCharacterId} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", !synthesisCharacterId ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} onClick={() => setSynthesisCharacterId("")} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">CosyVoice 官方默认声音</strong><small className="truncate text-muted-foreground">无需创建角色，用于直接合成与模型验证</small></span>{!synthesisCharacterId && <Check className="size-3.5 shrink-0 text-primary" />}</button>
-        {characters.map((character) => <button aria-pressed={synthesisCharacterId === character.id} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", synthesisCharacterId === character.id ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} key={character.id} onClick={() => setSynthesisCharacterId(character.id)} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{character.name}</strong><small className="truncate text-muted-foreground">{character.promptText ? `提示词已就绪 · ${character.promptText.length} 字` : "提示词未生成"}</small></span>{synthesisCharacterId === character.id && <Check className="size-3.5 shrink-0 text-primary" />}</button>)}
+        <button aria-pressed={!synthesisCharacterId} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", !synthesisCharacterId ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} onClick={() => setSynthesisCharacterId("")} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{t(locale, "character.defaultVoice")}</strong><small className="truncate text-muted-foreground">{t(locale, "character.defaultVoiceNote")}</small></span>{!synthesisCharacterId && <Check className="size-3.5 shrink-0 text-primary" />}</button>
+        {characters.map((character) => <button aria-pressed={synthesisCharacterId === character.id} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", synthesisCharacterId === character.id ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} key={character.id} onClick={() => setSynthesisCharacterId(character.id)} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{character.name}</strong><small className="truncate text-muted-foreground">{character.promptText ? tF(locale, "character.promptReady", { count: character.promptText.length }) : t(locale, "character.promptMissing")}</small></span>{synthesisCharacterId === character.id && <Check className="size-3.5 shrink-0 text-primary" />}</button>)}
       </div>
     </ControlSection>
     <Separator />
-    <ControlSection eyebrow="风格" title="情绪指令">
-      <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/50 p-1">{styles.map((item) => <Button className={cn(style === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setStyle(item.id)} title={item.note} type="button" variant="ghost" size="sm">{item.label}</Button>)}</div>
+    <ControlSection eyebrow={t(locale, "controls.style.eyebrow")} title={t(locale, "controls.style.title")}>
+      <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/50 p-1">{styles.map((item) => <Button className={cn(style === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setStyle(item.id)} title={t(locale, item.noteKey)} type="button" variant="ghost" size="sm">{t(locale, item.labelKey)}</Button>)}</div>
     </ControlSection>
     <Separator />
-    {ttsReady ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />CosyVoice2 已就绪</p> : <ControlSection eyebrow="模型" title="CosyVoice2 权重">
+    {ttsReady ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "tts.ready")}</p> : <ControlSection eyebrow={t(locale, "controls.model.eyebrow")} title={t(locale, "controls.tts.title")}>
       <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
-      <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />下载 CosyVoice2 权重</Button>
+      <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />{t(locale, "download.cosyvoice")}</Button>
     </ControlSection>}
-    <Button disabled={busy !== null || !synthesisText.trim() || !ttsReady} onClick={onRun} type="button" size="lg">{busy === "synthesize" ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}合成配音</Button>
+    <Button disabled={busy !== null || !synthesisText.trim() || !ttsReady} onClick={onRun} type="button" size="lg">{busy === "synthesize" ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}{t(locale, "nav.synthesize.label")}</Button>
   </CardContent>;
 }
 
 function SelectedSource({ asset }: { asset: MediaAsset }) {
+  const locale = useRecutLocale();
   const source = `/v1/media/assets/${encodeURIComponent(asset.id)}/content`;
   return <figure className="overflow-hidden rounded-md border bg-muted/40">
     <div className="grid place-items-center bg-muted">{asset.kind === "video" ? <video className="aspect-video w-full object-cover" controls preload="metadata" src={source} /> : <audio className="w-full" controls preload="metadata" src={source} />}</div>
-    <figcaption className="grid gap-0.5 px-2.5 py-2"><strong className="truncate text-xs">{asset.name}</strong><span className="text-[10px] text-muted-foreground">{asset.kind === "audio" ? "音频" : "视频"} · 已选择</span></figcaption>
+    <figcaption className="grid gap-0.5 px-2.5 py-2"><strong className="truncate text-xs">{asset.name}</strong><span className="text-[10px] text-muted-foreground">{tF(locale, "source.selected", { kind: kindLabel(locale, asset.kind) })}</span></figcaption>
   </figure>;
 }
 
 function Setup({ autoPrepare, busy, elapsedSeconds, failure, failureLogs, logs, message, pythonVersion, onPrepare, onAskAgent }: { autoPrepare: boolean; busy: string | null; elapsedSeconds: number; failure: string; failureLogs: ShellJobLog[]; logs: ShellJobLog[]; message: string; pythonVersion?: string; onPrepare: () => void; onAskAgent: () => void }) {
+  const locale = useRecutLocale();
   const started = useRef(false);
   useEffect(() => { if (autoPrepare && !started.current) { started.current = true; onPrepare(); } }, [autoPrepare, onPrepare]);
   const failureText = failureLogs.length ? failureLogs.map((entry) => entry.text).join("") : "";
@@ -557,16 +571,16 @@ function Setup({ autoPrepare, busy, elapsedSeconds, failure, failureLogs, logs, 
     <Card className="rounded-lg shadow-none">
       <CardHeader>
         <div className="mb-2 grid size-10 place-items-center rounded-md border bg-accent text-primary"><LoaderCircle className={cn("size-5", busy === "prepare" && "animate-spin")} /></div>
-        <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">声音工坊</p>
-        <CardTitle className="mt-1">正在启动</CardTitle>
-        <CardDescription>首次使用需要一点时间，完成后即可选择模型、转写或创建声音角色。</CardDescription>
+        <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "app.title")}</p>
+        <CardTitle className="mt-1">{t(locale, "setup.title")}</CardTitle>
+        <CardDescription>{t(locale, "setup.description")}</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-3">
-        {busy === "prepare" && <><div className="flex items-center gap-1.5 font-mono text-[11px] font-semibold text-primary"><Clock3 className="size-3.5" />任务运行中 · {formatElapsed(elapsedSeconds)}</div><pre className="max-h-56 overflow-auto rounded-md bg-terminal p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg" aria-label="准备过程">{logs.length ? logText(logs) : "正在启动本地运行环境…"}</pre></>}
-        {failure && <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"><strong className="text-sm">运行环境准备失败</strong><p className="break-all leading-relaxed text-destructive">{failure}</p>{pythonVersion && <p className="text-[11px] text-muted-foreground">当前 venv 使用 Python {pythonVersion}；若日志显示无法找到依赖版本，通常是当前 Python 没有对应 wheel，可切换 Python 版本或重试。</p>}{failureText && <pre className="max-h-56 overflow-auto rounded-md bg-terminal p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg" aria-label="失败日志">{failureText}</pre>}<div className="flex gap-2"><Button disabled={busy !== null} onClick={onAskAgent} type="button" variant="outline" size="sm" className="w-fit text-destructive"><Send className="size-3.5" />交给右侧 Codex 处理</Button></div></div>}
+        {busy === "prepare" && <><div className="flex items-center gap-1.5 font-mono text-[11px] font-semibold text-primary"><Clock3 className="size-3.5" />{tF(locale, "setup.runningLabel", { time: formatElapsed(elapsedSeconds) })}</div><pre className="max-h-56 overflow-auto rounded-md bg-terminal p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg" aria-label={t(locale, "aria.setupPrep")}>{logs.length ? logText(logs) : t(locale, "setup.prepLogsLabel")}</pre></>}
+        {failure && <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"><strong className="text-sm">{t(locale, "setup.failureTitle")}</strong><p className="break-all leading-relaxed text-destructive">{failure}</p>{pythonVersion && <p className="text-[11px] text-muted-foreground">{tF(locale, "setup.pythonHint", { version: pythonVersion })}</p>}{failureText && <pre className="max-h-56 overflow-auto rounded-md bg-terminal p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg" aria-label={t(locale, "aria.failureLogs")}>{failureText}</pre>}<div className="flex gap-2"><Button disabled={busy !== null} onClick={onAskAgent} type="button" variant="outline" size="sm" className="w-fit text-destructive"><Send className="size-3.5" />{t(locale, "setup.askAgent")}</Button></div></div>}
       </CardContent>
       <CardFooter className="flex-col items-start gap-2">
-        <Button disabled={busy !== null} onClick={onPrepare} type="button" variant="outline">{busy === "prepare" ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}{busy === "prepare" ? "正在启动…" : "重新尝试"}</Button>
+        <Button disabled={busy !== null} onClick={onPrepare} type="button" variant="outline">{busy === "prepare" ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}{busy === "prepare" ? t(locale, "msg.starting") : t(locale, "setup.retry")}</Button>
         <p className="text-xs text-muted-foreground" role="status">{message}</p>
       </CardFooter>
     </Card>
@@ -574,99 +588,109 @@ function Setup({ autoPrepare, busy, elapsedSeconds, failure, failureLogs, logs, 
 }
 
 function TranscriptOutput({ busy, transcript, onEditSegment, onSave }: { busy: string | null; transcript: TranscriptDetail | null; onEditSegment: (index: number, text: string) => void; onSave: (transcript: TranscriptDetail) => void }) {
+  const locale = useRecutLocale();
   const [showSRT, setShowSRT] = useState(false);
   const [copied, setCopied] = useState(false);
   const srt = transcript ? buildSRT(transcript.segments) : "";
   const copy = async () => { if (!transcript) return; if (await copyText(srt)) { setCopied(true); window.setTimeout(() => setCopied(false), 1600); } };
   return <CardContent className="flex h-full flex-col gap-4">
     <div className="flex items-center justify-between gap-3 border-b pb-3">
-      <div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">文稿</p><h2 className="mt-0.5 text-sm font-semibold">转写与字幕</h2></div>
-      {transcript && <div className="flex gap-1.5"><Button disabled={!transcript} onClick={() => void copy()} type="button" variant="outline" size="sm">{copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copied ? "已复制" : "复制 SRT"}</Button><Button disabled={!transcript} onClick={() => transcript && downloadBlob(`transcript-${transcript.id}.srt`, srt, "text/plain")} type="button" variant="outline" size="sm"><Download className="size-3.5" />SRT</Button><Button disabled={!transcript} onClick={() => transcript && downloadBlob(`transcript-${transcript.id}.json`, JSON.stringify({ model: transcript.model, language: transcript.language, duration: transcript.duration, segments: transcript.segments }, null, 2), "application/json")} type="button" variant="outline" size="sm"><FileAudio className="size-3.5" />JSON</Button></div>}
+      <div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "output.transcript.eyebrow")}</p><h2 className="mt-0.5 text-sm font-semibold">{t(locale, "output.transcript.title")}</h2></div>
+      {transcript && <div className="flex gap-1.5"><Button disabled={!transcript} onClick={() => void copy()} type="button" variant="outline" size="sm">{copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copied ? t(locale, "copy.copied") : t(locale, "copy.srt")}</Button><Button disabled={!transcript} onClick={() => transcript && downloadBlob(`transcript-${transcript.id}.srt`, srt, "text/plain")} type="button" variant="outline" size="sm"><Download className="size-3.5" />SRT</Button><Button disabled={!transcript} onClick={() => transcript && downloadBlob(`transcript-${transcript.id}.json`, JSON.stringify({ model: transcript.model, language: transcript.language, duration: transcript.duration, segments: transcript.segments }, null, 2), "application/json")} type="button" variant="outline" size="sm"><FileAudio className="size-3.5" />JSON</Button></div>}
     </div>
     <div className="grid flex-1 place-items-center">
       {transcript ? <div className="grid w-full max-w-2xl gap-3">
-        <div className="flex flex-wrap items-center gap-1.5"><Badge variant="secondary">{transcript.sourceKind === "video" ? "视频" : "音频"} · {speechModels.find((item) => item.id === transcript.model)?.label ?? transcript.model}</Badge><Badge variant="secondary">{transcript.language === "auto" ? "自动检测" : transcript.language === "zh" ? "中文" : "英文"}</Badge><Badge variant="secondary">{transcript.duration.toFixed(1)} 秒</Badge><Badge variant="secondary">{transcript.segments.length} 段</Badge>{transcript.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div>
-        {transcript.audioURL && <audio className="w-full" controls preload="metadata" src={transcript.audioURL} aria-label="转写源声音" />}
-        <div className="max-h-[340px] overflow-auto rounded-md border">{transcript.segments.map((segment, index) => <div className="grid grid-cols-[132px_minmax(0,1fr)] items-center gap-3 border-b px-3 py-1.5 last:border-0" key={`${transcript.id}-${index}`}><span className="font-mono text-[11px] whitespace-nowrap text-muted-foreground">{formatTimecode(segment.start).replace(",", " ").slice(0, 8)} → {formatTimecode(segment.end).replace(",", " ").slice(0, 8)}</span><Input aria-label={`第 ${index + 1} 段文本`} className="h-8 border-transparent bg-transparent shadow-none hover:border-border focus-visible:bg-background" onChange={(event) => onEditSegment(index, event.target.value)} value={segment.text} /></div>)}</div>
-        <div className="flex items-center justify-between gap-3"><Button onClick={() => setShowSRT((visible) => !visible)} type="button" variant="ghost" size="sm" className="w-fit px-0 text-primary hover:bg-transparent hover:text-primary"><FileAudio className="size-3.5" />{showSRT ? "收起 SRT" : "预览 SRT"}</Button><p className="text-[11px] text-muted-foreground">文本可编辑，复制或下载会使用编辑后的内容。</p></div>
+        <div className="flex flex-wrap items-center gap-1.5"><Badge variant="secondary">{kindLabel(locale, transcript.sourceKind)} · {speechModels.find((item) => item.id === transcript.model)?.label ?? transcript.model}</Badge><Badge variant="secondary">{languageLabel(locale, transcript.language)}</Badge><Badge variant="secondary">{tF(locale, "unit.seconds", { value: transcript.duration.toFixed(1) })}</Badge><Badge variant="secondary">{tF(locale, "unit.segments", { value: transcript.segments.length })}</Badge>{transcript.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div>
+        {transcript.audioURL && <audio className="w-full" controls preload="metadata" src={transcript.audioURL} aria-label={t(locale, "aria.transcriptSource")} />}
+        <div className="max-h-[340px] overflow-auto rounded-md border">{transcript.segments.map((segment, index) => <div className="grid grid-cols-[132px_minmax(0,1fr)] items-center gap-3 border-b px-3 py-1.5 last:border-0" key={`${transcript.id}-${index}`}><span className="font-mono text-[11px] whitespace-nowrap text-muted-foreground">{formatTimecode(segment.start).replace(",", " ").slice(0, 8)} → {formatTimecode(segment.end).replace(",", " ").slice(0, 8)}</span><Input aria-label={tF(locale, "aria.segmentText", { index: index + 1 })} className="h-8 border-transparent bg-transparent shadow-none hover:border-border focus-visible:bg-background" onChange={(event) => onEditSegment(index, event.target.value)} value={segment.text} /></div>)}</div>
+        <div className="flex items-center justify-between gap-3"><Button onClick={() => setShowSRT((visible) => !visible)} type="button" variant="ghost" size="sm" className="w-fit px-0 text-primary hover:bg-transparent hover:text-primary"><FileAudio className="size-3.5" />{showSRT ? t(locale, "srt.collapse") : t(locale, "srt.preview")}</Button><p className="text-[11px] text-muted-foreground">{t(locale, "transcript.editableHint")}</p></div>
         {showSRT && <pre className="max-h-52 overflow-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{srt}</pre>}
-        <div className="flex items-center justify-between gap-3 border-t pt-3"><p className="text-xs text-muted-foreground">确认无误后保存为素材库的转写素材（含源声音、SRT 与 JSON）。</p>{transcript.savedAssetId ? <Badge variant="secondary">素材库已保存</Badge> : <Button disabled={busy !== null} onClick={() => onSave(transcript)} type="button" size="sm">{busy === "save" ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}保存到素材库</Button>}</div>
-      </div> : <div className="grid max-w-60 place-items-center gap-2 text-center text-sm text-muted-foreground"><MessageSquareText className="size-7 text-muted-foreground/60" /><p>选择素材并转写后，文稿与字幕会显示在这里。</p></div>}
+        <div className="flex items-center justify-between gap-3 border-t pt-3"><p className="text-xs text-muted-foreground">{t(locale, "transcript.saveHint")}</p>{transcript.savedAssetId ? <Badge variant="secondary">{t(locale, "badge.savedInLibrary")}</Badge> : <Button disabled={busy !== null} onClick={() => onSave(transcript)} type="button" size="sm">{busy === "save" ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}{t(locale, "save.toLibrary")}</Button>}</div>
+      </div> : <div className="grid max-w-60 place-items-center gap-2 text-center text-sm text-muted-foreground"><MessageSquareText className="size-7 text-muted-foreground/60" /><p>{t(locale, "transcript.empty")}</p></div>}
     </div>
   </CardContent>;
 }
 
 function CharactersOutput({ busy, characters, onRemove, onSave }: { busy: string | null; characters: VoiceCharacter[]; onRemove: (character: VoiceCharacter) => void; onSave: (character: VoiceCharacter) => void }) {
+  const locale = useRecutLocale();
   return <CardContent className="flex h-full flex-col gap-4">
-    <div className="flex items-center justify-between border-b pb-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">声音角色</p><h2 className="mt-0.5 text-sm font-semibold">可复用角色库</h2></div><Badge variant="secondary">{characters.length} 个</Badge></div>
+    <div className="flex items-center justify-between border-b pb-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "output.characters.eyebrow")}</p><h2 className="mt-0.5 text-sm font-semibold">{t(locale, "output.characters.title")}</h2></div><Badge variant="secondary">{tF(locale, "characters.count", { count: characters.length })}</Badge></div>
     <div className="grid flex-1 content-start gap-3 overflow-auto">
-      {characters.length ? characters.map((character) => <CharacterPreview busy={busy} character={character} key={character.id} onRemove={() => onRemove(character)} onSave={() => onSave(character)} />) : <div className="grid place-items-center gap-2 py-16 text-center text-sm text-muted-foreground"><Mic className="size-7 text-muted-foreground/60" /><p>用一段参考人声创建声音角色，之后就能让它朗读任何文本。</p></div>}
+      {characters.length ? characters.map((character) => <CharacterPreview busy={busy} character={character} key={character.id} onRemove={() => onRemove(character)} onSave={() => onSave(character)} />) : <div className="grid place-items-center gap-2 py-16 text-center text-sm text-muted-foreground"><Mic className="size-7 text-muted-foreground/60" /><p>{t(locale, "characters.empty")}</p></div>}
     </div>
   </CardContent>;
 }
 
 function CharacterPreview({ busy, character, onRemove, onSave }: { busy: string | null; character: VoiceCharacter; onRemove?: () => void; onSave: () => void }) {
-  return <Card className="rounded-lg shadow-none"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-3"><CardTitle className="min-w-0 truncate text-sm">{character.name}</CardTitle>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div><CardDescription className="text-[11px]">参考转写：{character.model.replace("whisper-", "")} · {timestamp(character.createdAt)}</CardDescription></CardHeader><CardContent className="grid gap-3"><audio className="w-full" controls preload="metadata" src={character.sampleURL} /><div className="grid gap-1"><p className="text-[11px] font-medium text-muted-foreground">角色提示词</p><p className="max-h-32 overflow-auto rounded-md bg-muted/60 p-2.5 text-xs leading-relaxed">{character.promptText || "（尚未生成）"}</p></div></CardContent><CardFooter className="justify-between gap-2"><Button disabled={busy !== null || Boolean(character.sampleAssetId)} onClick={onSave} type="button" variant="outline" size="sm"><Save className="size-3.5" />{character.sampleAssetId ? "素材库已保存" : "保存参考音"}</Button>{onRemove && <Button disabled={busy !== null} onClick={onRemove} type="button" variant="ghost" size="sm" className="text-destructive hover:text-destructive"><Trash2 className="size-3.5" />删除</Button>}</CardFooter></Card>;
+  const locale = useRecutLocale();
+  return <Card className="rounded-lg shadow-none"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-3"><CardTitle className="min-w-0 truncate text-sm">{character.name}</CardTitle>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div><CardDescription className="text-[11px]">{tF(locale, "character.referenceTranscript", { model: character.model.replace("whisper-", ""), time: timestamp(locale, character.createdAt) })}</CardDescription></CardHeader><CardContent className="grid gap-3"><audio className="w-full" controls preload="metadata" src={character.sampleURL} /><div className="grid gap-1"><p className="text-[11px] font-medium text-muted-foreground">{t(locale, "character.prompt.label")}</p><p className="max-h-32 overflow-auto rounded-md bg-muted/60 p-2.5 text-xs leading-relaxed">{character.promptText || t(locale, "character.prompt.missing")}</p></div></CardContent><CardFooter className="justify-between gap-2"><Button disabled={busy !== null || Boolean(character.sampleAssetId)} onClick={onSave} type="button" variant="outline" size="sm"><Save className="size-3.5" />{character.sampleAssetId ? t(locale, "badge.savedInLibrary") : t(locale, "save.referenceAudio")}</Button>{onRemove && <Button disabled={busy !== null} onClick={onRemove} type="button" variant="ghost" size="sm" className="text-destructive hover:text-destructive"><Trash2 className="size-3.5" />{t(locale, "delete")}</Button>}</CardFooter></Card>;
 }
 
 function SynthesisOutput({ busy, selected, syntheses, onSave }: { busy: string | null; selected: Synthesis | null; syntheses: Synthesis[]; onSave: (synthesis: Synthesis) => void }) {
+  const locale = useRecutLocale();
   const current = selected ?? syntheses[0] ?? null;
   return <CardContent className="flex h-full flex-col gap-4">
-    <div className="flex items-center justify-between border-b pb-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">配音</p><h2 className="mt-0.5 text-sm font-semibold">合成预览</h2></div>{current && (current.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有预览</Badge>)}</div>
+    <div className="flex items-center justify-between border-b pb-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "output.synthesis.eyebrow")}</p><h2 className="mt-0.5 text-sm font-semibold">{t(locale, "output.synthesis.title")}</h2></div>{current && (current.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.privatePreview")}</Badge>)}</div>
     <div className="grid flex-1 place-items-center">
-      {current ? <div className="grid w-full max-w-md gap-3"><div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"><div className="grid gap-0.5"><strong className="text-xs font-medium">当前配音</strong><small className="text-[11px] text-muted-foreground">{styles.find((item) => item.id === current.style)?.label ?? current.style} · {current.duration.toFixed(1)} 秒 · {timestamp(current.createdAt)}</small></div>{current.savedAssetId ? <Check className="size-4 text-primary" /> : null}</div><audio className="w-full" controls src={current.outputURL} /></div> : <div className="grid max-w-60 place-items-center gap-2 text-center text-sm text-muted-foreground"><Sparkles className="size-7 text-muted-foreground/60" /><p>选择声音角色并输入文本后，配音会显示在这里。</p></div>}
+      {current ? <div className="grid w-full max-w-md gap-3"><div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"><div className="grid gap-0.5"><strong className="text-xs font-medium">{t(locale, "synthesis.current")}</strong><small className="text-[11px] text-muted-foreground">{tF(locale, "synthesis.detail", { style: styleLabel(locale, current.style), duration: current.duration.toFixed(1), time: timestamp(locale, current.createdAt) })}</small></div>{current.savedAssetId ? <Check className="size-4 text-primary" /> : null}</div><audio className="w-full" controls src={current.outputURL} /></div> : <div className="grid max-w-60 place-items-center gap-2 text-center text-sm text-muted-foreground"><Sparkles className="size-7 text-muted-foreground/60" /><p>{t(locale, "synthesis.empty")}</p></div>}
     </div>
-    {current && <div className="flex items-center justify-between gap-3 border-t pt-3"><p className="text-xs text-muted-foreground">试听满意后再决定是否保存到素材库。</p>{current.savedAssetId ? <Badge variant="secondary">素材库已保存</Badge> : <Button disabled={busy !== null} onClick={() => onSave(current)} type="button" size="sm">{busy === "save" ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}保存到素材库</Button>}</div>}
+    {current && <div className="flex items-center justify-between gap-3 border-t pt-3"><p className="text-xs text-muted-foreground">{t(locale, "synthesis.listenHint")}</p>{current.savedAssetId ? <Badge variant="secondary">{t(locale, "badge.savedInLibrary")}</Badge> : <Button disabled={busy !== null} onClick={() => onSave(current)} type="button" size="sm">{busy === "save" ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}{t(locale, "save.toLibrary")}</Button>}</div>}
   </CardContent>;
 }
 
 function BottomPanel({ activeTab, cancelling, elapsedSeconds, logs, onCancel, onOpenCharacter, onOpenSynthesis, onOpenTranscript, onTabChange, running, tab, transcripts, characters, syntheses }: { activeTab: "history" | "logs"; cancelling: boolean; elapsedSeconds: number; logs: ShellJobLog[]; onCancel: () => void; onOpenCharacter: (character: VoiceCharacter) => void; onOpenSynthesis: (synthesis: Synthesis) => void; onOpenTranscript: (id: string) => void; onTabChange: (tab: "history" | "logs") => void; running: boolean; tab: Tab; transcripts: TranscriptSummary[]; characters: VoiceCharacter[]; syntheses: Synthesis[] }) {
+  const locale = useRecutLocale();
   const historyCount = tab === "transcribe" ? transcripts.length : tab === "characters" ? characters.length : syntheses.length;
   return <Card className="mt-4 rounded-lg shadow-none">
-    <div className="flex items-center gap-1 border-b bg-muted/30 px-3 py-2" role="tablist" aria-label="输出记录">
-      <Button aria-controls="audio-history" aria-selected={activeTab === "history"} className={cn("h-8 rounded-md px-3 text-muted-foreground hover:bg-background hover:text-foreground", activeTab === "history" && "bg-background text-foreground shadow-sm ring-1 ring-foreground/10 hover:bg-background")} id="audio-history-tab" onClick={() => onTabChange("history")} role="tab" type="button" variant="ghost" size="sm">历史 <Badge variant="secondary" className="ml-1">{historyCount}</Badge></Button>
-      <Button aria-controls="audio-logs" aria-selected={activeTab === "logs"} className={cn("h-8 rounded-md px-3 text-muted-foreground hover:bg-background hover:text-foreground", activeTab === "logs" && "bg-background text-foreground shadow-sm ring-1 ring-foreground/10 hover:bg-background")} id="audio-logs-tab" onClick={() => onTabChange("logs")} role="tab" type="button" variant="ghost" size="sm">执行日志 <Badge variant="secondary" className="ml-1">{logs.length}</Badge></Button>
-      {running && <Button className="ml-auto text-destructive hover:text-destructive" disabled={cancelling} onClick={onCancel} type="button" variant="ghost" size="sm"><CircleStop className="size-3.5" />{cancelling ? "正在停止" : "停止任务"}</Button>}
+    <div className="flex items-center gap-1 border-b bg-muted/30 px-3 py-2" role="tablist" aria-label={t(locale, "bottom.outputTabsLabel")}>
+      <Button aria-controls="audio-history" aria-selected={activeTab === "history"} className={cn("h-8 rounded-md px-3 text-muted-foreground hover:bg-background hover:text-foreground", activeTab === "history" && "bg-background text-foreground shadow-sm ring-1 ring-foreground/10 hover:bg-background")} id="audio-history-tab" onClick={() => onTabChange("history")} role="tab" type="button" variant="ghost" size="sm">{t(locale, "bottom.history")} <Badge variant="secondary" className="ml-1">{historyCount}</Badge></Button>
+      <Button aria-controls="audio-logs" aria-selected={activeTab === "logs"} className={cn("h-8 rounded-md px-3 text-muted-foreground hover:bg-background hover:text-foreground", activeTab === "logs" && "bg-background text-foreground shadow-sm ring-1 ring-foreground/10 hover:bg-background")} id="audio-logs-tab" onClick={() => onTabChange("logs")} role="tab" type="button" variant="ghost" size="sm">{t(locale, "bottom.logs")} <Badge variant="secondary" className="ml-1">{logs.length}</Badge></Button>
+      {running && <Button className="ml-auto text-destructive hover:text-destructive" disabled={cancelling} onClick={onCancel} type="button" variant="ghost" size="sm"><CircleStop className="size-3.5" />{cancelling ? t(locale, "bottom.stopping") : t(locale, "bottom.stop")}</Button>}
     </div>
     <div className="min-h-40">
-      {activeTab === "history" ? <div aria-labelledby="audio-history-tab" id="audio-history" role="tabpanel"><History onOpenCharacter={onOpenCharacter} onOpenSynthesis={onOpenSynthesis} onOpenTranscript={onOpenTranscript} tab={tab} transcripts={transcripts} characters={characters} syntheses={syntheses} /></div> : <div aria-labelledby="audio-logs-tab" className="min-h-40 bg-terminal text-terminal-fg" id="audio-logs" role="tabpanel">{running && <p className="flex items-center gap-1.5 border-b border-white/10 px-4 py-3 font-mono text-[11px] font-semibold text-primary"><Clock3 className="size-3.5" />任务运行中 · {formatElapsed(elapsedSeconds)}</p>}<pre className="max-h-56 overflow-auto p-4 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{logs.length ? logText(logs) : "正在等待任务输出…"}</pre></div>}
+      {activeTab === "history" ? <div aria-labelledby="audio-history-tab" id="audio-history" role="tabpanel"><History onOpenCharacter={onOpenCharacter} onOpenSynthesis={onOpenSynthesis} onOpenTranscript={onOpenTranscript} tab={tab} transcripts={transcripts} characters={characters} syntheses={syntheses} /></div> : <div aria-labelledby="audio-logs-tab" className="min-h-40 bg-terminal text-terminal-fg" id="audio-logs" role="tabpanel">{running && <p className="flex items-center gap-1.5 border-b border-white/10 px-4 py-3 font-mono text-[11px] font-semibold text-primary"><Clock3 className="size-3.5" />{tF(locale, "setup.runningLabel", { time: formatElapsed(elapsedSeconds) })}</p>}<pre className="max-h-56 overflow-auto p-4 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{logs.length ? logText(logs) : t(locale, "bottom.waitingLogs")}</pre></div>}
     </div>
   </Card>;
 }
 
 function History({ onOpenCharacter, onOpenSynthesis, onOpenTranscript, tab, transcripts, characters, syntheses }: { onOpenCharacter: (character: VoiceCharacter) => void; onOpenSynthesis: (synthesis: Synthesis) => void; onOpenTranscript: (id: string) => void; tab: Tab; transcripts: TranscriptSummary[]; characters: VoiceCharacter[]; syntheses: Synthesis[] }) {
+  const locale = useRecutLocale();
   const items = tab === "transcribe" ? transcripts : tab === "characters" ? characters : syntheses;
-  return <div><div className="flex items-center justify-between border-b px-4 py-2.5"><h3 className="text-sm font-semibold">全部输出</h3><span className="font-mono text-[11px] text-muted-foreground">{items.length} 条</span></div>{items.length ? <div className="grid gap-3 p-4 min-[700px]:grid-cols-2">{tab === "transcribe" ? transcripts.map((item) => <HistoryTranscriptCard item={item} key={item.id} onOpen={onOpenTranscript} />) : tab === "characters" ? characters.map((item) => <HistoryCharacterCard item={item} key={item.id} onOpen={onOpenCharacter} />) : syntheses.map((item) => <HistorySynthesisCard item={item} key={item.id} onOpen={onOpenSynthesis} />)}</div> : <p className="px-4 py-4 text-xs text-muted-foreground">还没有历史输出。</p>}</div>;
+  return <div><div className="flex items-center justify-between border-b px-4 py-2.5"><h3 className="text-sm font-semibold">{t(locale, "history.allOutputs")}</h3><span className="font-mono text-[11px] text-muted-foreground">{tF(locale, "history.count", { count: items.length })}</span></div>{items.length ? <div className="grid gap-3 p-4 min-[700px]:grid-cols-2">{tab === "transcribe" ? transcripts.map((item) => <HistoryTranscriptCard item={item} key={item.id} onOpen={onOpenTranscript} />) : tab === "characters" ? characters.map((item) => <HistoryCharacterCard item={item} key={item.id} onOpen={onOpenCharacter} />) : syntheses.map((item) => <HistorySynthesisCard item={item} key={item.id} onOpen={onOpenSynthesis} />)}</div> : <p className="px-4 py-4 text-xs text-muted-foreground">{t(locale, "history.empty")}</p>}</div>;
 }
 
 function HistoryTranscriptCard({ item, onOpen }: { item: TranscriptSummary; onOpen: (id: string) => void }) {
-  const label = item.sourceKind === "video" ? "视频转写" : "音频转写";
-  return <button aria-label={`打开${label}详情`} className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item.id)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{label}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{speechModels.find((model) => model.id === item.model)?.label ?? item.model} · {item.language === "auto" ? "自动" : item.language}</p></div>{item.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div><p className="font-mono text-[10px] text-muted-foreground">{item.duration.toFixed(1)} 秒 · {timestamp(item.createdAt)}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">点击查看详情</p></button>;
+  const locale = useRecutLocale();
+  const label = item.sourceKind === "video" ? t(locale, "history.transcribe.video") : t(locale, "history.transcribe.audio");
+  return <button aria-label={tF(locale, "history.transcribe.open", { label })} className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item.id)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{label}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{speechModels.find((model) => model.id === item.model)?.label ?? item.model} · {languageLabel(locale, item.language)}</p></div>{item.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div><p className="font-mono text-[10px] text-muted-foreground">{tF(locale, "history.duration", { duration: item.duration.toFixed(1), time: timestamp(locale, item.createdAt) })}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">{t(locale, "history.open")}</p></button>;
 }
 
 function HistoryCharacterCard({ item, onOpen }: { item: VoiceCharacter; onOpen: (item: VoiceCharacter) => void }) {
-  return <button aria-label={`打开声音角色 ${item.name} 详情`} className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{item.name}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{item.model.replace("whisper-", "")} · {timestamp(item.createdAt)}</p></div>{item.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div><p className="line-clamp-2 text-[11px] text-muted-foreground">提示词：{item.promptText || "（尚未生成）"}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">点击查看详情</p></button>;
+  const locale = useRecutLocale();
+  return <button aria-label={tF(locale, "history.character.open", { name: item.name })} className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{item.name}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{item.model.replace("whisper-", "")} · {timestamp(locale, item.createdAt)}</p></div>{item.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div><p className="line-clamp-2 text-[11px] text-muted-foreground">{tF(locale, "history.prompt", { prompt: item.promptText || t(locale, "character.prompt.missing") })}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">{t(locale, "history.open")}</p></button>;
 }
 
 function HistorySynthesisCard({ item, onOpen }: { item: Synthesis; onOpen: (item: Synthesis) => void }) {
-  return <button aria-label="打开配音详情" className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{styles.find((style) => style.id === item.style)?.label ?? item.style}配音</p><p className="mt-0.5 text-[11px] text-muted-foreground">{item.duration.toFixed(1)} 秒 · {timestamp(item.createdAt)}</p></div>{item.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />已保存</Badge> : <Badge variant="outline">私有</Badge>}</div><p className="line-clamp-2 text-[11px] text-muted-foreground">{item.text}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">点击查看详情</p></button>;
+  const locale = useRecutLocale();
+  return <button aria-label={t(locale, "history.synthesis.open")} className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{tF(locale, "history.synthesis.title", { style: styleLabel(locale, item.style) })}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{tF(locale, "history.duration", { duration: item.duration.toFixed(1), time: timestamp(locale, item.createdAt) })}</p></div>{item.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div><p className="line-clamp-2 text-[11px] text-muted-foreground">{item.text}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">{t(locale, "history.open")}</p></button>;
 }
 
 function HistoryPreviewDialog({ busy, onClose, onEditSegment, onSaveCharacter, onSaveSynthesis, onSaveTranscript, preview }: { busy: string | null; onClose: () => void; onEditSegment: (index: number, text: string) => void; onSaveCharacter: (character: VoiceCharacter) => void; onSaveSynthesis: (synthesis: Synthesis) => void; onSaveTranscript: (transcript: TranscriptDetail) => void; preview: HistoryPreview }) {
+  const locale = useRecutLocale();
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [onClose]);
 
-  const title = preview.kind === "transcript" ? "转写详情" : preview.kind === "character" ? "声音角色详情" : "配音详情";
+  const title = preview.kind === "transcript" ? t(locale, "dialog.transcript.title") : preview.kind === "character" ? t(locale, "dialog.character.title") : t(locale, "dialog.synthesis.title");
   const content = preview.kind === "transcript"
     ? <TranscriptOutput busy={busy} onEditSegment={onEditSegment} onSave={onSaveTranscript} transcript={preview.item} />
     : preview.kind === "character"
       ? <div className="p-6"><CharacterPreview busy={busy} character={preview.item} onSave={() => onSaveCharacter(preview.item)} /></div>
       : <SynthesisOutput busy={busy} onSave={onSaveSynthesis} selected={preview.item} syntheses={[]} />;
 
-  return <div aria-labelledby="history-preview-title" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-foreground/30 p-4 backdrop-blur-[1px]" onClick={onClose} role="dialog"><div className="relative max-h-[calc(100vh-2rem)] w-full max-w-4xl overflow-auto rounded-lg border bg-card shadow-xl" onClick={(event) => event.stopPropagation()}><div className="sticky top-0 z-10 flex items-center justify-between border-b bg-card/95 px-6 py-3 backdrop-blur"><h2 className="text-sm font-semibold" id="history-preview-title">{title}</h2><Button aria-label="关闭详情" onClick={onClose} type="button" variant="ghost" size="icon"><X className="size-4" /></Button></div>{content}</div></div>;
+  return <div aria-labelledby="history-preview-title" aria-modal="true" className="fixed inset-0 z-50 grid place-items-center bg-foreground/30 p-4 backdrop-blur-[1px]" onClick={onClose} role="dialog"><div className="relative max-h-[calc(100vh-2rem)] w-full max-w-4xl overflow-auto rounded-lg border bg-card shadow-xl" onClick={(event) => event.stopPropagation()}><div className="sticky top-0 z-10 flex items-center justify-between border-b bg-card/95 px-6 py-3 backdrop-blur"><h2 className="text-sm font-semibold" id="history-preview-title">{title}</h2><Button aria-label={t(locale, "dialog.close")} onClick={onClose} type="button" variant="ghost" size="icon"><X className="size-4" /></Button></div>{content}</div></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

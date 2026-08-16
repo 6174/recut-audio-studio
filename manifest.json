@@ -4,6 +4,12 @@
   "name": "声音工坊",
   "author": "Recut",
   "description": "本地转写、声音角色与配音：把音视频转成字幕和可编辑文稿，用一段参考音创建声音角色，再让角色朗读新文本。",
+  "localized": {
+    "en": {
+      "name": "Audio Studio",
+      "description": "Transcribe, create voice characters and synthesize speech locally: turn audio or video into subtitles and an editable transcript, build a reusable voice character from one reference clip, then have it read new text."
+    }
+  },
   "repository": "https://github.com/6174/recut-audio-studio",
   "version": "0.1.0",
   "type": "standalone",
