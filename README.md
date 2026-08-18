@@ -64,6 +64,7 @@ background.js           App SQLite、素材复制、Python 调用与显式导入
 bootstrap.py            固定 CosyVoice/Matcha-TTS 源码提交、创建专属 TTS venv、安装完整锁文件并验证依赖闭包
 manifest.json           独立 App 身份、权限和 operation 契约
 python/                 平台 venv 的 lockfile、模型下载和转写/角色/合成 launcher
+rfc/                    设计决策：如双引擎配音（IndexTTS-2.5）方案
 skills/                 App skill：约束 Agent 只能使用公开 operation 契约
 ui/                     React/Vite 运行环境、模型管理、转写、角色、配音与预览工作台
 ```
