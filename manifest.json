@@ -30,20 +30,20 @@
       "name": "audio.status",
       "surfaces": ["api", "mcp"],
       "capability": true,
-      "description": "检查声音工坊的本地 Python、FFmpeg、Whisper/Qwen3-ASR 模型与 CosyVoice 运行环境和已下载模型；activeJob 返回当前异步任务状态供轮询。",
+      "description": "检查声音工坊的本地 Python、FFmpeg、Whisper/Qwen3-ASR 模型与 CosyVoice/VoxCPM 运行环境（engines）和已下载模型；activeJob 返回当前异步任务状态供轮询。",
       "inputSchema": { "type": "object", "properties": {} }
     },
     {
       "name": "audio.prepare",
       "surfaces": ["api", "mcp"],
-      "description": "自动安装声音工坊的 Python 运行依赖和 CosyVoice 官方代码，不下载模型权重。异步提交，立即返回 job；用平台 recut.job.status / recut.job.wait 轮询终态。",
+      "description": "自动安装声音工坊的 Python 运行依赖和 CosyVoice 官方代码，并尽力准备 VoxCPM 专属运行环境，不下载模型权重。异步提交，立即返回 job；用平台 recut.job.status / recut.job.wait 轮询终态。",
       "inputSchema": { "type": "object", "properties": {} }
     },
     {
       "name": "audio.install",
       "surfaces": ["api", "mcp"],
-      "description": "安装声音工坊运行依赖，并从 Hugging Face、ModelScope 或自动回退来源下载用户选择的 Whisper、Qwen3-ASR 或 CosyVoice2 权重到 .recut/models/audio-studio。异步提交，立即返回 job；用平台 recut.job.status / recut.job.wait 轮询终态。",
-      "inputSchema": { "type": "object", "required": ["model"], "properties": { "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3", "cosyvoice2"] }, "source": { "type": "string", "enum": ["automatic", "huggingface", "modelscope"] } } }
+      "description": "安装声音工坊运行依赖，并从 Hugging Face、ModelScope 或自动回退来源下载用户选择的 Whisper、Qwen3-ASR、CosyVoice2 或 VoxCPM 权重（voxcpm2 约 5.0GB / voxcpm1.5 约 2.0GB / voxcpm-0.5b 约 1.6GB；VoxCPM 版本会先安装其独立 venv 运行环境）。异步提交，立即返回 job；用平台 recut.job.status / recut.job.wait 轮询终态。",
+      "inputSchema": { "type": "object", "required": ["model"], "properties": { "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3", "cosyvoice2", "voxcpm2", "voxcpm1.5", "voxcpm-0.5b"] }, "source": { "type": "string", "enum": ["automatic", "huggingface", "modelscope"] } } }
     },
     {
       "name": "audio.transcribe",
@@ -93,8 +93,9 @@
     {
       "name": "audio.synthesize",
       "surfaces": ["api", "mcp"],
-      "description": "用一段文本和可选声音角色合成配音；未提供角色时使用 CosyVoice 官方默认声音。所有输出均须通过 ASR 回读文本验收才返回异步任务结果。",
-      "inputSchema": { "type": "object", "required": ["text"], "properties": { "characterId": { "type": "string", "description": "可选；省略时使用 CosyVoice 官方默认声音。" }, "text": { "type": "string" }, "style": { "type": "string", "enum": ["neutral", "calm", "excited", "gentle"] } } }
+      "capability": true,
+      "description": "用一段文本和可选声音角色合成配音；engine 缺省使用 CosyVoice 官方默认声音，可选 VoxCPM2/1.5/0.5B（VoxCPM2 无角色时用 Voice Design 默认音，VoxCPM1.5/0.5B 必须提供角色参考音）。所有输出均须通过 ASR 回读文本验收才返回异步任务结果。",
+      "inputSchema": { "type": "object", "required": ["text"], "properties": { "characterId": { "type": "string", "description": "可选；缺省时 CosyVoice 用官方默认声音、VoxCPM2 用 Voice Design 默认音，VoxCPM1.5/0.5B 必填。" }, "text": { "type": "string" }, "engine": { "type": "string", "enum": ["cosyvoice2", "voxcpm2", "voxcpm1.5", "voxcpm-0.5b"], "description": "可选；缺省 cosyvoice2。" }, "style": { "type": "string", "enum": ["neutral", "calm", "excited", "gentle"], "description": "可选；仅 cosyvoice2 生效。" } } }
     },
     {
       "name": "audio.synthesis.complete",
@@ -111,6 +112,7 @@
     {
       "name": "audio.save",
       "surfaces": ["api", "mcp"],
+      "capability": true,
       "description": "将用户明确选择的私有转写文稿（SRT + JSON + 源声音组合）、配音或声音角色参考音导入素材库；转写会创建 platform 的 transcript 素材。",
       "inputSchema": { "type": "object", "required": ["id", "kind"], "properties": { "id": { "type": "string" }, "kind": { "type": "string", "enum": ["transcript", "synthesis", "character"] } } }
     },
