@@ -1,6 +1,6 @@
 /*
  * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务
- * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、配音合成、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材。audio.transcribe 扩了 saveToLibrary 开关（默认 false=私有产物不自动入库；true=终态懒入库为全局 transcript 素材并幂等去重，一次能力调用完成转写+入库）。转写/列表/详情/状态 op 已标记 capability，可被其他 App 经 ctx.capabilities.invoke 复用。
+ * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、配音合成（CosyVoice 或 VoxCPM 引擎/版本可选）、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材。audio.transcribe 扩了 saveToLibrary 开关（默认 false=私有产物不自动入库；true=终态懒入库为全局 transcript 素材并幂等去重，一次能力调用完成转写+入库）。转写/列表/详情/状态 op 已标记 capability，可被其他 App 经 ctx.capabilities.invoke 复用。
  * [POS]: audio-studio 的唯一业务后端；声音角色须通过质量验收，未选角色时使用 CosyVoice 官方默认声音进入 TTS，输出先停留在 App 文件沙箱，绝不生成时自动创建素材库 Asset（除 saveToLibrary:true 的显式授权）。
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
@@ -8,6 +8,8 @@
 const WHISPER_MODELS = ["whisper-small", "whisper-medium", "whisper-large-v3"];
 const QWEN_MODELS = ["qwen3-asr-0.6b", "qwen3-asr-1.7b"];
 const ASR_MODELS = new Set([...WHISPER_MODELS, ...QWEN_MODELS]);
+const VOXCPM_MODELS = ["voxcpm2", "voxcpm1.5", "voxcpm-0.5b"];
+const ENGINES = new Set(["cosyvoice2", ...VOXCPM_MODELS]);
 const DOWNLOAD_SOURCES = new Set(["automatic", "huggingface", "modelscope"]);
 const KINDS = new Set(["audio", "video"]);
 const LANGUAGES = new Set(["auto", "zh", "en"]);
@@ -42,6 +44,7 @@ function ensureSchema(ctx) {
   ensureColumn(ctx, "audio_transcripts", "audio_path", "text not null default ''");
   ensureColumn(ctx, "audio_transcripts", "saved_asset_id", "text not null default ''");
   ensureColumn(ctx, "audio_transcripts", "save_to_library", "integer not null default 0");
+  ensureColumn(ctx, "audio_syntheses", "engine", "text not null default 'cosyvoice2'");
 }
 
 function ensureColumn(ctx, table, column, definition) {
@@ -233,7 +236,7 @@ function prepare(_, ctx) {
 function install(input, ctx) {
   const selected = value(input, "model");
   const source = value(input, "source") || downloadSource(ctx);
-  if (!ASR_MODELS.has(selected) && selected !== "cosyvoice2") throw new Error("model must be an ASR model or cosyvoice2");
+  if (!ASR_MODELS.has(selected) && selected !== "cosyvoice2" && !VOXCPM_MODELS.includes(selected)) throw new Error("model must be an ASR model, cosyvoice2 or a VoxCPM version");
   setDownloadSource(ctx, source);
   ensureNoActiveJob(ctx);
   return { job: trackJob(ctx, ctx.python.run(["python/audio_runner.py", "install", "--model", selected, "--source", source]), "install") };
@@ -350,7 +353,7 @@ function transcript(input, ctx) {
   if (!record) throw new Error("Audio transcript files are missing.");
   record.savedAssetId = savedAssetId;
   const data = readJSON(ctx, row.json_path) || { segments: [] };
-  return { ...record, segments: data.segments || [], srt: ctx.files.readText(row.srt_path), transcriptAssetId: savedAssetId };
+  return { ...record, status: row.status, segments: data.segments || [], srt: ctx.files.readText(row.srt_path), transcriptAssetId: savedAssetId };
 }
 
 function characterCreate(input, ctx) {
@@ -437,18 +440,22 @@ function synthesize(input, ctx) {
   const characterID = value(input, "characterId");
   const text = value(input, "text");
   const style = value(input, "style") || "neutral";
+  const engine = value(input, "engine") || "cosyvoice2";
   if (!text) throw new Error("text is required");
+  if (!ENGINES.has(engine)) throw new Error("engine must be cosyvoice2, voxcpm2, voxcpm1.5 or voxcpm-0.5b");
   if (!STYLES.has(style)) throw new Error("style must be neutral, calm, excited, or gentle");
+  const isVoxCpm = VOXCPM_MODELS.includes(engine);
+  if (isVoxCpm && !characterID && engine !== "voxcpm2") throw new Error("VoxCPM1.5 / VoxCPM-0.5B use continuation cloning and need a voice character.");
   ensureNoActiveJob(ctx);
   const characters = characterID ? ctx.sqlite.query("select id, sample_path, prompt_text from audio_characters where id = ? and status = 'completed'", [characterID]).filter((row) => characterQuality(ctx, row)) : [];
   if (characterID && !characters.length) throw new Error("Selected voice character was not found.");
   const character = characters[0] || { id: "__cosyvoice_default__", sample_path: "", prompt_text: "" };
   const id = outputID();
   const outputPath = `syntheses/${id}.wav`;
-  const record = { id, characterId: characterID, text, style, outputPath, mimeType: "audio/wav", savedAssetId: "", createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
-  ctx.sqlite.execute("insert into audio_syntheses (id, character_id, text, style, output_path, mime_type, saved_asset_id, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.characterId, record.text, record.style, record.outputPath, record.mimeType, record.savedAssetId, record.createdAt, record.jobId, record.status, record.error]);
+  const record = { id, characterId: characterID, text, style, engine, outputPath, mimeType: "audio/wav", savedAssetId: "", createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
+  ctx.sqlite.execute("insert into audio_syntheses (id, character_id, text, style, engine, output_path, mime_type, saved_asset_id, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.characterId, record.text, record.style, record.engine, record.outputPath, record.mimeType, record.savedAssetId, record.createdAt, record.jobId, record.status, record.error]);
   try {
-    const args = ["python/audio_runner.py", "synthesize", "--text", text, "--style", style, "--output", outputPath];
+    const args = ["python/audio_runner.py", "synthesize", "--text", text, "--style", style, "--engine", engine, "--output", outputPath];
     if (characterID) args.push("--reference", character.sample_path, "--prompt-text", character.prompt_text);
     else args.push("--default-voice");
     const job = ctx.python.run(args);
@@ -463,7 +470,7 @@ function synthesize(input, ctx) {
 }
 
 function synthesisRecord(ctx, row) {
-  const record = { id: row.id, characterId: row.character_id, text: row.text, style: row.style, savedAssetId: row.saved_asset_id, createdAt: row.created_at, outputURL: "", duration: 0 };
+  const record = { id: row.id, characterId: row.character_id, text: row.text, style: row.style, engine: row.engine || "cosyvoice2", savedAssetId: row.saved_asset_id, createdAt: row.created_at, outputURL: "", duration: 0 };
   try { record.outputURL = ctx.files.url(row.output_path); }
   catch (error) {
     ctx.sqlite.execute("update audio_syntheses set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : tr(ctx, "合成音频已丢失。", "The synthesized audio is missing."), row.id]);
@@ -478,7 +485,7 @@ function synthesisComplete(input, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
   const id = value(input, "id");
-  const rows = ctx.sqlite.query("select id, character_id, text, style, output_path, saved_asset_id, created_at, status, error from audio_syntheses where id = ?", [id]);
+  const rows = ctx.sqlite.query("select id, character_id, text, style, engine, output_path, saved_asset_id, created_at, status, error from audio_syntheses where id = ?", [id]);
   if (!rows.length) throw new Error("Audio synthesis was not found.");
   const row = rows[0];
   if (row.status === "queued" || row.status === "") return { id: row.id, status: "queued" };
@@ -490,7 +497,7 @@ function synthesisComplete(input, ctx) {
 function syntheses(_, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
-  return ctx.sqlite.query("select id, character_id, text, style, output_path, saved_asset_id, created_at from audio_syntheses where status = 'completed' order by created_at desc").map((row) => synthesisRecord(ctx, row)).filter(Boolean);
+  return ctx.sqlite.query("select id, character_id, text, style, engine, output_path, saved_asset_id, created_at from audio_syntheses where status = 'completed' order by created_at desc").map((row) => synthesisRecord(ctx, row)).filter(Boolean);
 }
 
 function save(input, ctx) {
