@@ -29,6 +29,7 @@
     {
       "name": "audio.status",
       "surfaces": ["api", "mcp"],
+      "capability": true,
       "description": "检查声音工坊的本地 Python、FFmpeg、Whisper/Qwen3-ASR 模型与 CosyVoice 运行环境和已下载模型；activeJob 返回当前异步任务状态供轮询。",
       "inputSchema": { "type": "object", "properties": {} }
     },
@@ -47,18 +48,21 @@
     {
       "name": "audio.transcribe",
       "surfaces": ["api", "mcp"],
-      "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，不会保存到素材库。异步提交，立即返回 job 与 transcript.id；用平台 recut.job.status / recut.job.wait 轮询，完成后用 audio.transcript(id) 读取分段与 SRT。",
-      "inputSchema": { "type": "object", "required": ["assetId", "kind", "model", "language"], "properties": { "assetId": { "type": "string" }, "kind": { "type": "string", "enum": ["audio", "video"] }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] }, "language": { "type": "string", "enum": ["auto", "zh", "en"] } } }
+      "capability": true,
+      "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，默认不会保存到素材库。异步提交，立即返回 job 与 transcript.id；用平台 recut.job.status / recut.job.wait 轮询，完成后用 audio.transcript(id) 读取分段与 SRT。saveToLibrary:true 时终态自动导入全局素材库为 transcript 素材（幂等去重），一次调用即完成转写+入库。",
+      "inputSchema": { "type": "object", "required": ["assetId", "kind", "model", "language"], "properties": { "assetId": { "type": "string" }, "kind": { "type": "string", "enum": ["audio", "video"] }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] }, "language": { "type": "string", "enum": ["auto", "zh", "en"] }, "saveToLibrary": { "type": "boolean", "description": "可选；默认 false=私有产物不自动入库；true=终态后自动导入为平台 transcript 素材并返回 transcriptAssetId。" } } }
     },
     {
       "name": "audio.transcripts",
       "surfaces": ["api", "mcp"],
+      "capability": true,
       "description": "读取尚未导入或已导出的声音工坊转写记录。",
       "inputSchema": { "type": "object", "properties": {} }
     },
     {
       "name": "audio.transcript",
       "surfaces": ["api", "mcp"],
+      "capability": true,
       "description": "读取一条已完成的转写记录，返回文稿分段、SRT 正文与可播放的源声音预览。",
       "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
     },

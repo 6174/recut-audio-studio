@@ -31,6 +31,8 @@
 | 用户明确保存的配音、角色参考音或转写 bundle（源声音 + SRT + JSON） | Recut 素材库，取得真实 `assetId` |
 | 转写 / 角色 / 合成记录 | 当前 App 的隔离 SQLite |
 
+> 跨 App 能力面：`audio.transcribe` / `audio.transcripts` / `audio.transcript` / `audio.status` 已在 manifest 标记 `capability: true`，可被其他 App 经平台通用能力桥（`ctx.capabilities.invoke`）复用。`audio.transcribe` 新增 `saveToLibrary` 开关（默认 `false` = 私有产物不自动入库；`true` = 完成时懒终态自动导入为全局 transcript 素材，幂等去重——编辑器「生成字幕」即一次调用转写+入库）。Agent 直连不传该开关，行为保持私有产物。
+
 ## 架构
 
 ```text

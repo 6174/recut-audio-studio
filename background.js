@@ -1,7 +1,7 @@
 /*
  * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务
- * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、配音合成、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材
- * [POS]: audio-studio 的唯一业务后端；声音角色须通过质量验收，未选角色时使用 CosyVoice 官方默认声音进入 TTS，输出先停留在 App 文件沙箱，绝不在生成时自动创建素材库 Asset
+ * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、配音合成、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材。audio.transcribe 扩了 saveToLibrary 开关（默认 false=私有产物不自动入库；true=终态懒入库为全局 transcript 素材并幂等去重，一次能力调用完成转写+入库）。转写/列表/详情/状态 op 已标记 capability，可被其他 App 经 ctx.capabilities.invoke 复用。
+ * [POS]: audio-studio 的唯一业务后端；声音角色须通过质量验收，未选角色时使用 CosyVoice 官方默认声音进入 TTS，输出先停留在 App 文件沙箱，绝不生成时自动创建素材库 Asset（除 saveToLibrary:true 的显式授权）。
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 
@@ -41,6 +41,7 @@ function ensureSchema(ctx) {
   ctx.sqlite.execute("create table if not exists audio_env_error (id integer primary key check (id = 1), job_id text not null, action text not null, error text not null, logs text not null, updated_at text not null)");
   ensureColumn(ctx, "audio_transcripts", "audio_path", "text not null default ''");
   ensureColumn(ctx, "audio_transcripts", "saved_asset_id", "text not null default ''");
+  ensureColumn(ctx, "audio_transcripts", "save_to_library", "integer not null default 0");
 }
 
 function ensureColumn(ctx, table, column, definition) {
@@ -235,14 +236,20 @@ function transcribe(input, ctx) {
   const kind = value(input, "kind");
   const model = value(input, "model");
   const language = value(input, "language");
+  const saveToLibrary = input.saveToLibrary === true || String(input.saveToLibrary || "").trim().toLowerCase() === "true";
   if (!assetID || !KINDS.has(kind) || !ASR_MODELS.has(model) || !LANGUAGES.has(language)) throw new Error("assetId, kind, model and language are required");
   ensureNoActiveJob(ctx);
+  // saveToLibrary 幂等去重：同源+同模型+同语言且已入库的已完成转写直接复用，不重复起 job、不产生重复全局资产。
+  if (saveToLibrary) {
+    const reuse = ctx.sqlite.query("select id, saved_asset_id from audio_transcripts where status = 'completed' and save_to_library = 1 and saved_asset_id != '' and source_asset_id = ? and model = ? and language = ? order by created_at desc limit 1", [assetID, model, language]);
+    if (reuse.length) return { reused: true, transcript: { id: reuse[0].id }, transcriptAssetId: reuse[0].saved_asset_id };
+  }
   const source = ctx.media.materialize(assetID);
   if (source.kind !== kind) throw new Error(`Selected Asset is ${source.kind}, not ${kind}.`);
   const id = outputID();
   const stem = `transcripts/${id}`;
-  const record = { id, sourceAssetId: assetID, sourceKind: kind, model, language, srtPath: `${stem}.srt`, jsonPath: `${stem}.json`, audioPath: `${stem}.audio.wav`, savedAssetId: "", duration: 0, createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
-  ctx.sqlite.execute("insert into audio_transcripts (id, source_asset_id, source_kind, model, language, srt_path, json_path, audio_path, saved_asset_id, duration, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.sourceAssetId, record.sourceKind, record.model, record.language, record.srtPath, record.jsonPath, record.audioPath, record.savedAssetId, record.duration, record.createdAt, record.jobId, record.status, record.error]);
+  const record = { id, sourceAssetId: assetID, sourceKind: kind, model, language, saveToLibrary, srtPath: `${stem}.srt`, jsonPath: `${stem}.json`, audioPath: `${stem}.audio.wav`, savedAssetId: "", duration: 0, createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
+  ctx.sqlite.execute("insert into audio_transcripts (id, source_asset_id, source_kind, model, language, save_to_library, srt_path, json_path, audio_path, saved_asset_id, duration, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.sourceAssetId, record.sourceKind, record.model, record.language, record.saveToLibrary ? 1 : 0, record.srtPath, record.jsonPath, record.audioPath, record.savedAssetId, record.duration, record.createdAt, record.jobId, record.status, record.error]);
   try {
     const job = ctx.python.run(["python/audio_runner.py", "transcribe", "--model", model, "--language", language, "--input", source.path, "--output", stem]);
     const tracked = trackJob(ctx, job, "transcribe", id);
@@ -253,6 +260,28 @@ function transcribe(input, ctx) {
     markFailed(ctx, "transcribe", id, error);
     throw error;
   }
+}
+
+// saveToLibrary 懒终态：记录已完成且要求入库但还没入库时，幂等补一次 importTranscript。
+// 编辑器侧 subtitle.status 轮询 audio.transcript 时自然触发，无需常驻 watcher。
+function finalizeSaveToLibrary(ctx, row) {
+  if (row.save_to_library !== 1 && String(row.save_to_library || "").trim() !== "1" && String(row.save_to_library || "").trim().toLowerCase() !== "true") return row.saved_asset_id || "";
+  if (row.saved_asset_id) return row.saved_asset_id;
+  if (row.status !== "completed") return "";
+  if (!row.audio_path) throw new Error(tr(ctx, "该转写没有保留源声音轨，无法保存为转写素材，请重新转写。", "This transcript has no source audio track, so it can't be saved as a transcript asset. Please transcribe again."));
+  const asset = ctx.media.importTranscript({
+    name: `transcript-${row.id}.wav`,
+    sourceAssetId: row.source_asset_id,
+    audioPath: row.audio_path,
+    srtPath: row.srt_path,
+    jsonPath: row.json_path,
+    mimeType: "audio/wav",
+    model: row.model,
+    language: row.language,
+    duration: row.duration,
+  });
+  ctx.sqlite.execute("update audio_transcripts set saved_asset_id = ? where id = ?", [asset.id, row.id]);
+  return asset.id;
 }
 
 function readJSON(ctx, path) {
@@ -276,21 +305,30 @@ function transcriptRecord(ctx, row) {
 function transcripts(_, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
-  return ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, duration, created_at, srt_path, json_path, audio_path, saved_asset_id from audio_transcripts where status = 'completed' order by created_at desc").map((row) => transcriptRecord(ctx, row)).filter(Boolean);
+  const rows = ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, save_to_library, duration, created_at, srt_path, json_path, audio_path, saved_asset_id, status from audio_transcripts where status = 'completed' order by created_at desc");
+  return rows.map((row) => {
+    try { finalizeSaveToLibrary(ctx, row); } catch (_) { /* 入库失败不阻断列表，保留私有产物 */ }
+    return transcriptRecord(ctx, row);
+  }).filter(Boolean);
 }
 
 function transcript(input, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
   const id = value(input, "id");
-  const rows = ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, duration, created_at, srt_path, json_path, audio_path, saved_asset_id, status, error from audio_transcripts where id = ?", [id]);
+  const rows = ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, save_to_library, duration, created_at, srt_path, json_path, audio_path, saved_asset_id, status, error from audio_transcripts where id = ?", [id]);
   if (!rows.length) throw new Error("Audio transcript was not found.");
   const row = rows[0];
   if (row.status !== "completed") return { id: row.id, status: row.status, error: row.error || "" };
+  let savedAssetId = row.saved_asset_id || "";
+  if (String(row.save_to_library || "").trim() === "1" || row.save_to_library === 1) {
+    savedAssetId = finalizeSaveToLibrary(ctx, row) || savedAssetId;
+  }
   const record = transcriptRecord(ctx, row);
   if (!record) throw new Error("Audio transcript files are missing.");
+  record.savedAssetId = savedAssetId;
   const data = readJSON(ctx, row.json_path) || { segments: [] };
-  return { ...record, segments: data.segments || [], srt: ctx.files.readText(row.srt_path) };
+  return { ...record, segments: data.segments || [], srt: ctx.files.readText(row.srt_path), transcriptAssetId: savedAssetId };
 }
 
 function characterCreate(input, ctx) {
