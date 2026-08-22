@@ -128,7 +128,8 @@
     },
     {
       "name": "audio.cancel",
-      "surfaces": ["api"],
+      "surfaces": ["api", "mcp"],
+      "capability": true,
       "description": "停止当前正在运行的声音工坊本地任务，并保留终态日志。",
       "inputSchema": { "type": "object", "properties": {} }
     }
