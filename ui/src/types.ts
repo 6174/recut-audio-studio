@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖声音工坊 App operation 与素材库 HTTP 返回的稳定 JSON
- * [OUTPUT]: 对外提供运行状态、下载源、素材、Whisper/Qwen 转写（含源声音与素材库保存状态）、角色与合成输出的 UI 类型
+ * [OUTPUT]: 对外提供运行状态、下载源、素材、Whisper/Qwen 转写（含源声音与素材库保存状态）、角色与合成输出的 UI 类型；TTS 支持 CosyVoice 与 VoxCPM 引擎
  * [POS]: ui/src 的领域契约；组件不重复解释后端记录字段
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
@@ -9,14 +9,18 @@ export type DownloadSource = "automatic" | "huggingface" | "modelscope";
 export type SourceKind = "audio" | "video";
 export type Language = "auto" | "zh" | "en";
 export type VoiceStyle = "neutral" | "calm" | "excited" | "gentle";
+export type VoxCpmVersion = "voxcpm2" | "voxcpm1.5" | "voxcpm-0.5b";
+export type TtsEngine = "cosyvoice2" | VoxCpmVersion;
 export type ShellJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type ShellJobLog = { jobId: string; sequence: number; text: string };
 export type ShellJob = { id: string; status: ShellJobStatus; error?: string; startedAt?: string };
 export type ActiveAudioJob = ShellJob & { action: "prepare" | "install" | "transcribe" | "character" | "synthesize"; recordID?: string; startedAt: string; logs: ShellJobLog[] };
-export type RuntimeStatus = { ready: boolean; pending?: boolean; modelsRoot: string; error?: string; pythonVersion?: string; downloadSource?: DownloadSource; asr: { installed: SpeechModel[]; qwenAligner?: boolean }; tts: { ready: boolean; repository?: boolean; model?: boolean }; activeJob?: ActiveAudioJob | null; setupError?: string; setupLogs?: ShellJobLog[] };
+export type VoxCpmModelStatus = { label: string; params: string; sampleRate: number; languages: number; sizeGb: number; downloaded: boolean; ready: boolean };
+export type VoxCpmEngineStatus = { runtime: boolean; runtimeError?: string | null; models: Record<VoxCpmVersion, VoxCpmModelStatus>; ready: boolean };
+export type RuntimeStatus = { ready: boolean; pending?: boolean; modelsRoot: string; error?: string; pythonVersion?: string; downloadSource?: DownloadSource; asr: { installed: SpeechModel[]; qwenAligner?: boolean }; tts: { ready: boolean; repository?: boolean; model?: boolean; verification?: boolean; engines?: { cosyvoice2?: { ready: boolean }; voxcpm?: VoxCpmEngineStatus } }; activeJob?: ActiveAudioJob | null; setupError?: string; setupLogs?: ShellJobLog[] };
 export type MediaAsset = { id: string; name: string; kind: SourceKind | string; mimeType: string; status: string };
 export type TranscriptSegment = { start: number; end: number; text: string; speaker: string; emotion: string };
 export type TranscriptSummary = { id: string; sourceAssetId: string; sourceKind: SourceKind; model: SpeechModel; language: string; duration: number; createdAt: string; srtURL: string; jsonURL: string; audioURL: string; savedAssetId: string };
 export type TranscriptDetail = TranscriptSummary & { segments: TranscriptSegment[]; srt: string; status?: string; error?: string };
 export type VoiceCharacter = { id: string; name: string; model: SpeechModel; promptText: string; sampleAssetId: string; createdAt: string; sampleURL: string };
-export type Synthesis = { id: string; characterId: string; text: string; style: VoiceStyle; savedAssetId: string; createdAt: string; outputURL: string; duration: number };
+export type Synthesis = { id: string; characterId: string; text: string; style: VoiceStyle; engine: TtsEngine; savedAssetId: string; createdAt: string; outputURL: string; duration: number };

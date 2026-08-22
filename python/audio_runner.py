@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-[INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、主 ASR venv、CosyVoice 专属官方 venv、模型权重与 FFmpeg
+[INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、主 ASR venv、CosyVoice 专属官方 venv、VoxCPM 专属 venv、模型权重与 FFmpeg
 [OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备与合成进度，并在底层模型静默时每 8 秒输出心跳；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、经连续语音/波形/声纹验收的 16k 角色参考音与合成 wav
-[POS]: audio-studio 的本地执行入口；实现 VoiceCloneEngine 的参考音预处理、片段筛选、质量验收和合成后 ASR 回读；CosyVoice 推理通过专属 worker 隔离版本冲突，不写入素材库
+[POS]: audio-studio 的本地执行入口；实现 VoiceCloneEngine 的参考音预处理、片段筛选、质量验收和合成后 ASR 回读；CosyVoice 与 VoxCPM 推理通过各自专属 worker 隔离版本冲突，不写入素材库
 [PROTOCOL]: 变更时更新此头部，然后检查 README.md
 """
 
@@ -46,6 +46,23 @@ COSYVOICE_MODEL_DIR = "cosyvoice/pretrained_models/CosyVoice2-0.5B"
 COSYVOICE_REPOSITORY = "cosyvoice/repository"
 DEFAULT_PROMPT_AUDIO = "asset/zero_shot_prompt.wav"
 DEFAULT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
+VOXCPM_MODELS = ["voxcpm2", "voxcpm1.5", "voxcpm-0.5b"]
+VOXCPM_HF_REPOS = {
+    "voxcpm2": "openbmb/VoxCPM2",
+    "voxcpm1.5": "openbmb/VoxCPM1.5",
+    "voxcpm-0.5b": "openbmb/VoxCPM-0.5B",
+}
+VOXCPM_MS_REPOS = {
+    "voxcpm2": "OpenBMB/VoxCPM2",
+    "voxcpm1.5": "OpenBMB/VoxCPM1.5",
+    "voxcpm-0.5b": "OpenBMB/VoxCPM-0.5B",
+}
+# 各版本权重体积（HF 实测近似，用于下载前与 UI 提示）；实际大小以下载时为准。
+VOXCPM_META = {
+    "voxcpm2": {"label": "VoxCPM2", "params": "2B", "sampleRate": 48000, "languages": 30, "sizeGb": 5.0},
+    "voxcpm1.5": {"label": "VoxCPM1.5", "params": "0.8B", "sampleRate": 44100, "languages": 2, "sizeGb": 2.0},
+    "voxcpm-0.5b": {"label": "VoxCPM-0.5B", "params": "0.5B", "sampleRate": 16000, "languages": 2, "sizeGb": 1.6},
+}
 # CosyVoice（含 vendored Matcha-TTS）在模型加载期 import 的第三方包；由 bootstrap 安装进 venv。
 # CosyVoice2 的声纹条件并不受益于整段录音。短、连续且可转写的语音片段
 # 比长录音更稳定，也不会让短文案落入模型的长度失衡区间。
@@ -249,14 +266,10 @@ def parse_worker_result(lines: list[str], return_code: int) -> dict:
     return payload
 
 
-def run_cosyvoice_worker(args: list[str]) -> dict:
-    python = cosyvoice_python()
-    if not python.is_file():
-        raise RuntimeError("CosyVoice 专属运行环境未就绪，请重新准备声音工坊运行环境。")
-    task = "正在提取 CosyVoice 声纹" if args[0] == "speaker" else "正在由 CosyVoice 合成语音"
+def run_worker_process(cmd: list[str], task: str) -> dict:
     print(f"[audio] {task} worker 已启动。", flush=True)
     process = subprocess.Popen(
-        [str(python), str(cosyvoice_runner()), *args],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -293,6 +306,14 @@ def run_cosyvoice_worker(args: list[str]) -> dict:
     return parse_worker_result(output, return_code)
 
 
+def run_cosyvoice_worker(args: list[str]) -> dict:
+    python = cosyvoice_python()
+    if not python.is_file():
+        raise RuntimeError("CosyVoice 专属运行环境未就绪，请重新准备声音工坊运行环境。")
+    task = "正在提取 CosyVoice 声纹" if args[0] == "speaker" else "正在由 CosyVoice 合成语音"
+    return run_worker_process([str(python), str(cosyvoice_runner()), *args], task)
+
+
 def cosyvoice_runtime_status() -> dict:
     python = cosyvoice_python()
     if not python.is_file():
@@ -303,6 +324,70 @@ def cosyvoice_runtime_status() -> dict:
     except RuntimeError as error:
         return {"ready": False, "error": str(error)}
     return {"ready": True, "versions": payload.get("versions", {})}
+
+
+def voxcpm_python() -> Path:
+    value = os.environ.get("RECUT_VENV", "")
+    if not value:
+        return Path("/nonexistent/recut-voxcpm-python")
+    root = Path(value)
+    return root.with_name(f"{root.name}-voxcpm") / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def voxcpm_runner() -> Path:
+    return Path(__file__).with_name("voxcpm_runner.py")
+
+
+def voxcpm_model(version: str) -> Path:
+    return model_root() / "voxcpm" / version
+
+
+def downloaded_voxcpm(version: str) -> bool:
+    path = voxcpm_model(version)
+    return (path / "config.json").is_file() and bool(list(path.glob("*.safetensors")) + list(path.glob("*.bin")))
+
+
+def ensure_voxcpm_runtime() -> None:
+    bootstrap = Path(__file__).resolve().parent.parent / "bootstrap.py"
+    print("[audio] 正在准备 VoxCPM 专属运行环境（独立 venv，首次安装较慢）。", flush=True)
+    subprocess.run([sys.executable, str(bootstrap), "--voxcpm-only"], check=True)
+
+
+def download_voxcpm(version: str, source: str) -> None:
+    target = voxcpm_model(version)
+    meta = VOXCPM_META[version]
+    print(f"[audio] 正在下载 {meta['label']} 权重（约 {meta['sizeGb']} GB）。", flush=True)
+    if source == "huggingface":
+        download_huggingface_repo(VOXCPM_HF_REPOS[version], target)
+    elif source == "modelscope":
+        download_modelscope_repo(VOXCPM_MS_REPOS[version], target)
+    else:
+        try:
+            print("[audio] 自动下载：先尝试 Hugging Face。", flush=True)
+            download_huggingface_repo(VOXCPM_HF_REPOS[version], target)
+        except Exception as error:
+            print(f"[audio] Hugging Face 不可用（{error}），改用 ModelScope。", flush=True)
+            download_modelscope_repo(VOXCPM_MS_REPOS[version], target)
+    print(f"[audio] {meta['label']} 权重已就绪。", flush=True)
+
+
+def voxcpm_runtime_status() -> dict:
+    python = voxcpm_python()
+    if not python.is_file():
+        return {"ready": False, "error": "VoxCPM 专属运行环境未就绪。"}
+    result = subprocess.run([str(python), str(voxcpm_runner()), "status"], capture_output=True, text=True)
+    try:
+        payload = parse_worker_result(result.stdout.splitlines(keepends=True) + result.stderr.splitlines(keepends=True), result.returncode)
+    except RuntimeError as error:
+        return {"ready": False, "error": str(error)}
+    return {"ready": True, "versions": payload.get("versions", {})}
+
+
+def run_voxcpm_worker(args: list[str]) -> dict:
+    python = voxcpm_python()
+    if not python.is_file():
+        raise RuntimeError("VoxCPM 专属运行环境未就绪，请在配音步骤安装 VoxCPM 运行环境。")
+    return run_worker_process([str(python), str(voxcpm_runner()), *args], "正在由 VoxCPM 合成语音")
 
 
 def state(root: Path) -> dict:
@@ -325,12 +410,35 @@ def state(root: Path) -> dict:
         problems.append("CosyVoice 官方仓库或 Matcha-TTS 子模块尚未准备。")
     elif model_ready and not tts_runtime["ready"]:
         problems.append(tts_runtime["error"])
+    voxcpm_runtime = voxcpm_runtime_status()
+    voxcpm_models = {}
+    for version in VOXCPM_MODELS:
+        meta = VOXCPM_META[version]
+        downloaded = downloaded_voxcpm(version)
+        voxcpm_models[version] = {
+            "label": meta["label"],
+            "params": meta["params"],
+            "sampleRate": meta["sampleRate"],
+            "languages": meta["languages"],
+            "sizeGb": meta["sizeGb"],
+            "downloaded": downloaded,
+            "ready": downloaded and voxcpm_runtime["ready"],
+        }
+    engines = {
+        "cosyvoice2": {"repository": repository_ready, "model": model_ready, "runtime": tts_runtime["ready"], "ready": repository_ready and model_ready and tts_runtime["ready"]},
+        "voxcpm": {
+            "runtime": voxcpm_runtime["ready"],
+            "runtimeError": None if voxcpm_runtime["ready"] else voxcpm_runtime.get("error"),
+            "models": voxcpm_models,
+            "ready": voxcpm_runtime["ready"] and any(voxcpm_models[version]["downloaded"] for version in VOXCPM_MODELS),
+        },
+    }
     return {
         "ready": not problems,
         "modelsRoot": str(root),
         "pythonVersion": f"{sys.version_info.major}.{sys.version_info.minor}",
         "asr": {"installed": installed, "qwenRuntime": qwen_runtime_ready},
-        "tts": {"repository": repository_ready, "model": model_ready, "runtime": tts_runtime["ready"], "verification": DEFAULT_VERIFICATION_MODEL in installed, "versions": tts_runtime.get("versions", {}), "ready": repository_ready and model_ready and tts_runtime["ready"] and DEFAULT_VERIFICATION_MODEL in installed},
+        "tts": {"repository": repository_ready, "model": model_ready, "runtime": tts_runtime["ready"], "verification": DEFAULT_VERIFICATION_MODEL in installed, "versions": tts_runtime.get("versions", {}), "ready": repository_ready and model_ready and tts_runtime["ready"] and DEFAULT_VERIFICATION_MODEL in installed, "engines": engines},
         "error": " ".join(problems),
     }
 
@@ -502,6 +610,9 @@ def install(selected: str, source: str) -> None:
         target = cosyvoice_model()
         download_repo(COSYVOICE_HF, target, source)
         print("[audio] CosyVoice2-0.5B 权重已就绪。", flush=True)
+    elif selected in VOXCPM_MODELS:
+        ensure_voxcpm_runtime()
+        download_voxcpm(selected, source)
     else:
         emit({"ready": False, "error": f"unknown install target {selected}"}, 1)
     emit(state(model_root()))
@@ -690,30 +801,58 @@ def prepare_character(model_id: str, source_relative: str, stem_relative: str) -
     emit({"ready": True, **meta})
 
 
-def synthesize(text: str, reference_relative: str, prompt_text: str, style: str, output_relative: str, default_voice: bool = False) -> None:
+def synthesize_voxcpm(engine: str, current: dict, text: str, reference_relative: str, prompt_text: str, default_voice: bool, output: Path) -> dict:
+    voxcpm = current["tts"]["engines"]["voxcpm"]
+    if not voxcpm["runtime"]:
+        raise RuntimeError(f"VoxCPM 运行环境未就绪：{voxcpm.get('runtimeError') or '请先在配音步骤安装 VoxCPM 运行环境。'}")
+    meta = VOXCPM_META[engine]
+    if not voxcpm["models"][engine]["downloaded"]:
+        raise RuntimeError(f"{meta['label']} 权重尚未下载，请先在配音步骤下载（约 {meta['sizeGb']} GB）。")
+    is_v2 = engine == "voxcpm2"
+    args = ["synthesize", "--version", engine, "--model-dir", str(voxcpm_model(engine)), "--text", text, "--output", str(output)]
+    if default_voice:
+        if not is_v2:
+            raise RuntimeError("VoxCPM1.5 / VoxCPM-0.5B 使用延续式克隆，没有默认音，请选择一个声音角色。")
+        args.append("--voice-design")
+    else:
+        reference = safe_file(reference_relative)
+        if not reference.is_file():
+            raise RuntimeError("声音角色参考音不可用。")
+        args += ["--reference", str(reference)]
+        if not is_v2:
+            args += ["--prompt-text", prompt_text]
+    print(f"[audio] 正在启动 VoxCPM（{meta['label']}）专属 worker（首次加载较慢）。", flush=True)
+    return run_voxcpm_worker(args)
+
+
+def synthesize(text: str, reference_relative: str, prompt_text: str, style: str, output_relative: str, default_voice: bool = False, engine: str = "cosyvoice2") -> None:
     current = state(model_root())
-    if not current["tts"]["ready"]:
-        emit({"ready": False, "error": current["error"] or "CosyVoice 运行环境未就绪。"}, 1)
     if DEFAULT_VERIFICATION_MODEL not in current["asr"]["installed"]:
         emit({"ready": False, "error": "缺少 Qwen3-ASR 0.6B，无法执行合成后文本回读验收。"}, 1)
-    repository = cosyvoice_repo()
-    model_dir = cosyvoice_model()
-    if not current["tts"]["ready"]:
-        emit({"ready": False, "error": "CosyVoice 运行环境未就绪：请先安装官方仓库（含 Matcha-TTS 子模块）并下载 CosyVoice2-0.5B 权重。"}, 1)
-    reference = repository / DEFAULT_PROMPT_AUDIO if default_voice else safe_file(reference_relative)
-    prompt_text = DEFAULT_PROMPT_TEXT if default_voice else prompt_text
-    if not reference.is_file() or not prompt_text:
-        raise RuntimeError("声音角色参考音或提示词不可用。")
     output = safe_file(output_relative)
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        print("[audio] 正在启动 CosyVoice2 专属 worker（首次加载较慢）。", flush=True)
-        voice_label = "CosyVoice 官方默认声音" if default_voice else "经验证声音角色"
-        print(f"[audio] 使用{voice_label}：{style} 风格。", flush=True)
-        rendered = run_cosyvoice_worker(["synthesize", "--model-dir", str(model_dir), "--reference", str(reference), "--prompt-text", prompt_text, "--text", text, "--output", str(output)])
+        if engine in VOXCPM_MODELS:
+            rendered = synthesize_voxcpm(engine, current, text, reference_relative, prompt_text, default_voice, output)
+            print(f"[audio] 使用{VOXCPM_META[engine]['label']}：{'Voice Design 默认音' if default_voice else '经验证声音角色'}。", flush=True)
+        else:
+            if not current["tts"]["ready"]:
+                emit({"ready": False, "error": current["error"] or "CosyVoice 运行环境未就绪。"}, 1)
+            repository = cosyvoice_repo()
+            model_dir = cosyvoice_model()
+            if not current["tts"]["ready"]:
+                emit({"ready": False, "error": "CosyVoice 运行环境未就绪：请先安装官方仓库（含 Matcha-TTS 子模块）并下载 CosyVoice2-0.5B 权重。"}, 1)
+            reference = repository / DEFAULT_PROMPT_AUDIO if default_voice else safe_file(reference_relative)
+            prompt_text = DEFAULT_PROMPT_TEXT if default_voice else prompt_text
+            if not reference.is_file() or not prompt_text:
+                raise RuntimeError("声音角色参考音或提示词不可用。")
+            print("[audio] 正在启动 CosyVoice2 专属 worker（首次加载较慢）。", flush=True)
+            voice_label = "CosyVoice 官方默认声音" if default_voice else "经验证声音角色"
+            print(f"[audio] 使用{voice_label}：{style} 风格。", flush=True)
+            rendered = run_cosyvoice_worker(["synthesize", "--model-dir", str(model_dir), "--reference", str(reference), "--prompt-text", prompt_text, "--text", text, "--output", str(output)])
         print("[audio] WAV 已生成，开始单次 Qwen3-ASR 回读验收。", flush=True)
         verification = verify_spoken_text(DEFAULT_VERIFICATION_MODEL, output, text, "合成输出")
-        meta = {"wav": str(output.relative_to(files_root())), "duration": rendered["duration"], "sampleRate": rendered["sampleRate"], "style": style, "verification": verification}
+        meta = {"wav": str(output.relative_to(files_root())), "duration": rendered["duration"], "sampleRate": rendered["sampleRate"], "style": style, "engine": engine, "verification": verification}
         Path(str(output) + ".meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[audio] 合成与回读验收完成：{meta['duration']:.1f} 秒，保真度 {verification['fidelity']:.2f}。", flush=True)
         emit({"ready": True, **meta})
@@ -728,7 +867,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
     install_parser = commands.add_parser("install")
-    install_parser.add_argument("--model", choices=ASR_MODELS + ["cosyvoice2"], required=True)
+    install_parser.add_argument("--model", choices=ASR_MODELS + ["cosyvoice2"] + VOXCPM_MODELS, required=True)
     install_parser.add_argument("--source", choices=sorted(DOWNLOAD_SOURCES), default="automatic")
     transcribe_parser = commands.add_parser("transcribe")
     transcribe_parser.add_argument("--model", choices=ASR_MODELS, required=True)
@@ -745,6 +884,7 @@ def main() -> None:
     synthesize_parser.add_argument("--prompt-text", default="")
     synthesize_parser.add_argument("--default-voice", action="store_true")
     synthesize_parser.add_argument("--style", choices=list(STYLES), default="neutral")
+    synthesize_parser.add_argument("--engine", choices=["cosyvoice2"] + VOXCPM_MODELS, default="cosyvoice2")
     synthesize_parser.add_argument("--output", required=True)
     args = parser.parse_args()
     try:
@@ -757,7 +897,7 @@ def main() -> None:
         elif args.command == "character":
             prepare_character(args.model, args.input, args.output)
         elif args.command == "synthesize":
-            synthesize(args.text, args.reference, args.prompt_text, args.style, args.output, args.default_voice)
+            synthesize(args.text, args.reference, args.prompt_text, args.style, args.output, args.default_voice, args.engine)
     except SystemExit:
         raise
     except Exception as error:

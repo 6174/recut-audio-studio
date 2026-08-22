@@ -1,0 +1,11 @@
+# [INPUT]: 由 bootstrap.py 创建的 VoxCPM 专属 Python 3.11 venv 读取。
+# [OUTPUT]: 重建 VoxCPM 官方运行组合；voxcpm 2.0.3 声明 torch>=2.5.0、torchaudio>=2.5.0、
+#           torchcodec、transformers>=4.36.2 与 gradio/funasr/datasets 等重依赖。
+# [POS]: audio-studio/python 的 VoxCPM 环境锁文件；绝不能与 Qwen3-ASR 或 CosyVoice 运行环境合并。
+# [PROTOCOL]: 变更时更新此头部，然后检查 README.md
+#
+# 受管闭包锁（非完整 freeze）：只固定 voxcpm 本体版本，torch/torchaudio/torchcodec/
+# transformers 等由 pip 解析到满足全部约束的版本。安装后 bootstrap 会执行 `pip check`
+# 与 voxcpm_runner.py status 自检兜底。待各目标平台（darwin-arm64 / windows-amd64 /
+# windows-arm64）首装验证后，再按平台补全为完整冻结版本。
+voxcpm==2.0.3

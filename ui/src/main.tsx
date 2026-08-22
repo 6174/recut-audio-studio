@@ -18,10 +18,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { recut, useRecutLocale, type Locale } from "./recut-sdk";
 import { t, tF, type I18nKey } from "./i18n";
-import type { ActiveAudioJob, DownloadSource, Language, MediaAsset, RuntimeStatus, ShellJob, ShellJobLog, SpeechModel, Synthesis, TranscriptDetail, TranscriptSegment, TranscriptSummary, VoiceCharacter, VoiceStyle } from "./types";
+import type { ActiveAudioJob, DownloadSource, Language, MediaAsset, RuntimeStatus, ShellJob, ShellJobLog, SpeechModel, Synthesis, TranscriptDetail, TranscriptSegment, TranscriptSummary, TtsEngine, VoiceCharacter, VoiceStyle, VoxCpmEngineStatus, VoxCpmVersion } from "./types";
 import "./index.css";
 
 type Tab = "transcribe" | "characters" | "synthesize";
+type EngineFamily = "cosyvoice2" | "voxcpm";
 
 const speechModels: { id: SpeechModel; label: string; noteKey: I18nKey }[] = [
   { id: "qwen3-asr-0.6b", label: "Qwen3 ASR 0.6B", noteKey: "model.qwen3-0.6b.note" },
@@ -50,9 +51,25 @@ const styles: { id: VoiceStyle; labelKey: I18nKey; noteKey: I18nKey }[] = [
   { id: "gentle", labelKey: "style.gentle", noteKey: "style.gentle.note" },
 ];
 
+const engines: { id: EngineFamily; labelKey: I18nKey; noteKey: I18nKey }[] = [
+  { id: "cosyvoice2", labelKey: "engine.cosyvoice.label", noteKey: "engine.cosyvoice.note" },
+  { id: "voxcpm", labelKey: "engine.voxcpm.label", noteKey: "engine.voxcpm.note" },
+];
+
+const voxcpmVersions: { id: VoxCpmVersion; labelKey: I18nKey; noteKey: I18nKey }[] = [
+  { id: "voxcpm2", labelKey: "engine.label.voxcpm2", noteKey: "voxcpm.voxcpm2.note" },
+  { id: "voxcpm1.5", labelKey: "engine.label.voxcpm1.5", noteKey: "voxcpm.voxcpm1.5.note" },
+  { id: "voxcpm-0.5b", labelKey: "engine.label.voxcpm-0.5b", noteKey: "voxcpm.voxcpm-0.5b.note" },
+];
+
+function engineLabel(locale: Locale, engine: string): string {
+  const item = engines.find((entry) => entry.id === engine) ?? voxcpmVersions.find((entry) => entry.id === engine);
+  return item ? t(locale, item.labelKey) : engine;
+}
+
 type ActiveJob = { id: string; action: ActiveAudioJob["action"]; recordID?: string; startedAt: number; status: ShellJob["status"]; error?: string };
 type HistoryPreview = { kind: "transcript"; item: TranscriptDetail } | { kind: "character"; item: VoiceCharacter } | { kind: "synthesis"; item: Synthesis };
-type SynthesisDraft = { text: string; characterId: string; style: VoiceStyle };
+type SynthesisDraft = { text: string; characterId: string; style: VoiceStyle; engine: EngineFamily; voxcpmVersion: VoxCpmVersion };
 
 const synthesisDraftStorageKey = "recut.audio-studio.synthesis-draft.v1";
 
@@ -63,8 +80,10 @@ function readSynthesisDraft(): SynthesisDraft {
       text: typeof draft.text === "string" ? draft.text : "",
       characterId: typeof draft.characterId === "string" ? draft.characterId : "",
       style: draft.style && styles.some((item) => item.id === draft.style) ? draft.style : "neutral",
+      engine: draft.engine && engines.some((item) => item.id === draft.engine) ? draft.engine : "cosyvoice2",
+      voxcpmVersion: draft.voxcpmVersion && voxcpmVersions.some((item) => item.id === draft.voxcpmVersion) ? draft.voxcpmVersion : "voxcpm2",
     };
-  } catch (_) { return { text: "", characterId: "", style: "neutral" }; }
+  } catch (_) { return { text: "", characterId: "", style: "neutral", engine: "cosyvoice2", voxcpmVersion: "voxcpm2" }; }
 }
 
 function saveSynthesisDraft(draft: SynthesisDraft) {
@@ -109,6 +128,8 @@ function App() {
   const [synthesisText, setSynthesisText] = useState(initialSynthesisDraft.text);
   const [synthesisCharacterId, setSynthesisCharacterId] = useState(initialSynthesisDraft.characterId);
   const [style, setStyle] = useState<VoiceStyle>(initialSynthesisDraft.style);
+  const [engine, setEngine] = useState<EngineFamily>(initialSynthesisDraft.engine);
+  const [voxcpmVersion, setVoxcpmVersion] = useState<VoxCpmVersion>(initialSynthesisDraft.voxcpmVersion);
   const [busy, setBusy] = useState<"prepare" | "install" | "transcribe" | "character" | "synthesize" | "save" | "upload" | "agent" | null>(null);
   const [message, setMessage] = useState(() => t(locale, "msg.starting"));
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
@@ -170,7 +191,7 @@ function App() {
   }, [restoreJob]);
 
   useEffect(() => { logsRef.current = logs; }, [logs]);
-  useEffect(() => { saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, style }); }, [style, synthesisCharacterId, synthesisText]);
+  useEffect(() => { saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, style, engine, voxcpmVersion }); }, [engine, style, synthesisCharacterId, synthesisText, voxcpmVersion]);
   useEffect(() => { window.addEventListener("recut-sdk-ready", refresh); void refresh(); return () => window.removeEventListener("recut-sdk-ready", refresh); }, [refresh]);
   useEffect(() => { void loadAssets().catch((error) => setMessage(error.message)); }, [loadAssets]);
   useEffect(() => { if (isValidActiveJob(status?.activeJob)) restoreJob(status.activeJob); }, [restoreJob, status?.activeJob]);
@@ -232,6 +253,11 @@ function App() {
   const sourceAsset = selectedAsset?.id === assetId ? selectedAsset : compatibleAssets.find((asset) => asset.id === assetId) ?? null;
   const readySpeechModel = Boolean(status?.asr.installed.includes(model));
   const ttsReady = Boolean(status?.tts.ready);
+  const voxcpmEngine = status?.tts.engines?.voxcpm ?? null;
+  const voxcpmModel = voxcpmEngine?.models[voxcpmVersion] ?? null;
+  const effectiveEngine: TtsEngine = engine === "cosyvoice2" ? "cosyvoice2" : voxcpmVersion;
+  const engineReady = engine === "cosyvoice2" ? ttsReady : Boolean(voxcpmModel?.ready);
+  const engineNeedsCharacter = engine === "voxcpm" && voxcpmVersion !== "voxcpm2";
   const running = busy === "prepare" || busy === "install" || busy === "transcribe" || busy === "character" || busy === "synthesize";
 
   const beginJob = (job: ShellJob, action: ActiveJob["action"], recordID?: string) => {
@@ -252,6 +278,23 @@ function App() {
     setMessage(t(locale, "msg.downloadingCosyVoice"));
     try { const result = await recut.background.call("audio.install", { model: "cosyvoice2", source: downloadSource }) as { job: ShellJob }; beginJob(result.job, "install"); }
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.installFailed")); setBusy(null); }
+  };
+
+  const installVoxCpm = async (version: VoxCpmVersion) => {
+    const model = voxcpmEngine?.models[version] ?? null;
+    const label = model?.label ?? version;
+    const sizeGb = model?.sizeGb ?? 0;
+    setBusy("install"); setFailure(""); showLogsForNewJob(); setLogs([]);
+    setMessage(tF(locale, "msg.downloadingVoxCpm", { label, size: sizeGb.toFixed(1) }));
+    try { const result = await recut.background.call("audio.install", { model: version, source: downloadSource }) as { job: ShellJob }; beginJob(result.job, "install"); }
+    catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.installFailed")); setBusy(null); }
+  };
+
+  const retryVoxCpmRuntime = async () => {
+    setBusy("prepare"); setFailure(""); showLogsForNewJob(); setLogs([]);
+    setMessage(t(locale, "msg.voxcpmRuntimeInstalling"));
+    try { const result = await recut.background.call("audio.prepare") as { job: ShellJob }; beginJob(result.job, "prepare"); }
+    catch (error) { const message = error instanceof Error ? error.message : t(locale, "msg.startFailed"); setFailure(message); setMessage(message); setBusy(null); }
   };
 
   const prepare = useCallback(async () => {
@@ -280,10 +323,11 @@ function App() {
 
   const synthesizeVoice = async () => {
     if (!synthesisText.trim()) return setMessage(t(locale, "msg.enterText"));
-    saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, style });
+    if (engineNeedsCharacter && !synthesisCharacterId) return setMessage(t(locale, "msg.pickReferenceForVoxCpm"));
+    saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, style, engine, voxcpmVersion });
     setBusy("synthesize"); setFailure(""); showLogsForNewJob(); setLogs([]);
     setMessage(t(locale, "msg.synthesizing"));
-    try { const result = await recut.background.call("audio.synthesize", { ...(synthesisCharacterId ? { characterId: synthesisCharacterId } : {}), text: synthesisText, style }) as { job: ShellJob; synthesis: { id: string } }; beginJob(result.job, "synthesize", result.synthesis.id); }
+    try { const result = await recut.background.call("audio.synthesize", { ...(synthesisCharacterId ? { characterId: synthesisCharacterId } : {}), text: synthesisText, style, engine: effectiveEngine }) as { job: ShellJob; synthesis: { id: string } }; beginJob(result.job, "synthesize", result.synthesis.id); }
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.synthesisFailed")); setBusy(null); }
   };
 
@@ -387,7 +431,7 @@ function App() {
   const controls = <div className="flex flex-col gap-6">
     {tab === "transcribe" && <TranscribeControls busy={busy} downloadSource={downloadSource} language={language} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setLanguage={setLanguage} setModel={setModel} sourceAsset={sourceAsset} sourceKind={sourceKind} upload={(file) => void upload(file, "source")} onChoose={() => void chooseSource([sourceKind])} onRun={() => void transcribeSource()} onInstall={() => void installSpeechModel()} onKindChange={(kind) => { setSourceKind(kind); setAssetId(""); setSelectedAsset(null); }} />}
     {tab === "characters" && <CharacterControls busy={busy} characterAsset={characterAsset} characterName={characterName} downloadSource={downloadSource} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setCharacterName={setCharacterName} setModel={setModel} upload={(file) => void upload(file, "character")} onChoose={() => void chooseCharacterSource()} onRun={() => void createCharacter()} onInstall={() => void installSpeechModel()} />}
-    {tab === "synthesize" && <SynthesizeControls busy={busy} characters={characters} downloadSource={downloadSource} setDownloadSource={setDownloadSource} setSynthesisCharacterId={setSynthesisCharacterId} setSynthesisText={setSynthesisText} setStyle={setStyle} style={style} synthesisCharacterId={synthesisCharacterId} synthesisText={synthesisText} ttsReady={ttsReady} onRun={() => void synthesizeVoice()} onInstall={() => void installCosyVoice()} />}
+    {tab === "synthesize" && <SynthesizeControls busy={busy} characters={characters} downloadSource={downloadSource} engine={engine} engineNeedsCharacter={engineNeedsCharacter} engineReady={engineReady} setDownloadSource={setDownloadSource} setEngine={setEngine} setSynthesisCharacterId={setSynthesisCharacterId} setSynthesisText={setSynthesisText} setStyle={setStyle} setVoxcpmVersion={setVoxcpmVersion} style={style} synthesisCharacterId={synthesisCharacterId} synthesisText={synthesisText} voxcpmEngine={voxcpmEngine} voxcpmVersion={voxcpmVersion} onInstall={() => void installCosyVoice()} onInstallVoxCpm={(version) => void installVoxCpm(version)} onRetryVoxCpmRuntime={() => void retryVoxCpmRuntime()} onRun={() => void synthesizeVoice()} />}
   </div>;
 
   const output = tab === "transcribe" ? <TranscriptOutput busy={busy} onSave={(transcript) => void saveTranscript(transcript)} transcript={currentTranscript} onEditSegment={updateSegmentText} />
@@ -527,29 +571,59 @@ function CharacterControls({ busy, characterAsset, characterName, downloadSource
   </CardContent>;
 }
 
-function SynthesizeControls({ busy, characters, downloadSource, setDownloadSource, setSynthesisCharacterId, setSynthesisText, setStyle, style, synthesisCharacterId, synthesisText, ttsReady, onRun, onInstall }: { busy: string | null; characters: VoiceCharacter[]; downloadSource: DownloadSource; setDownloadSource: (value: DownloadSource) => void; setSynthesisCharacterId: (value: string) => void; setSynthesisText: (value: string) => void; setStyle: (value: VoiceStyle) => void; style: VoiceStyle; synthesisCharacterId: string; synthesisText: string; ttsReady: boolean; onRun: () => void; onInstall: () => void }) {
+function SynthesizeControls({ busy, characters, downloadSource, engine, engineNeedsCharacter, engineReady, setDownloadSource, setEngine, setSynthesisCharacterId, setSynthesisText, setStyle, setVoxcpmVersion, style, synthesisCharacterId, synthesisText, voxcpmEngine, voxcpmVersion, onInstall, onInstallVoxCpm, onRetryVoxCpmRuntime, onRun }: { busy: string | null; characters: VoiceCharacter[]; downloadSource: DownloadSource; engine: EngineFamily; engineNeedsCharacter: boolean; engineReady: boolean; setDownloadSource: (value: DownloadSource) => void; setEngine: (value: EngineFamily) => void; setSynthesisCharacterId: (value: string) => void; setSynthesisText: (value: string) => void; setStyle: (value: VoiceStyle) => void; setVoxcpmVersion: (value: VoxCpmVersion) => void; style: VoiceStyle; synthesisCharacterId: string; synthesisText: string; voxcpmEngine: VoxCpmEngineStatus | null; voxcpmVersion: VoxCpmVersion; onInstall: () => void; onInstallVoxCpm: (version: VoxCpmVersion) => void; onRetryVoxCpmRuntime: () => void; onRun: () => void }) {
   const locale = useRecutLocale();
+  const isVoxCpm = engine !== "cosyvoice2";
+  const selectedVersion = voxcpmVersions.find((item) => item.id === voxcpmVersion) ?? voxcpmVersions[0];
+  const voxcpmModel = voxcpmEngine?.models[voxcpmVersion] ?? null;
+  const canRun = !busy && Boolean(synthesisText.trim()) && engineReady && (!engineNeedsCharacter || Boolean(synthesisCharacterId));
   return <CardContent className="flex flex-col gap-6">
     <ControlSection eyebrow={t(locale, "controls.text.eyebrow")} title={t(locale, "controls.text.title")}>
       <Textarea aria-label={t(locale, "controls.text.title")} disabled={busy !== null} onChange={(event) => setSynthesisText(event.target.value)} placeholder={t(locale, "controls.text.placeholder")} rows={5} value={synthesisText} />
     </ControlSection>
     <Separator />
-    <ControlSection eyebrow={t(locale, "controls.voice.eyebrow")} title={t(locale, "controls.voice.title")}>
-      <div className="grid max-h-52 gap-1 overflow-auto pr-1">
-        <button aria-pressed={!synthesisCharacterId} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", !synthesisCharacterId ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} onClick={() => setSynthesisCharacterId("")} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{t(locale, "character.defaultVoice")}</strong><small className="truncate text-muted-foreground">{t(locale, "character.defaultVoiceNote")}</small></span>{!synthesisCharacterId && <Check className="size-3.5 shrink-0 text-primary" />}</button>
-        {characters.map((character) => <button aria-pressed={synthesisCharacterId === character.id} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", synthesisCharacterId === character.id ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} key={character.id} onClick={() => setSynthesisCharacterId(character.id)} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{character.name}</strong><small className="truncate text-muted-foreground">{character.promptText ? tF(locale, "character.promptReady", { count: character.promptText.length }) : t(locale, "character.promptMissing")}</small></span>{synthesisCharacterId === character.id && <Check className="size-3.5 shrink-0 text-primary" />}</button>)}
+    <ControlSection eyebrow={t(locale, "controls.engine.eyebrow")} title={t(locale, "controls.engine.title")}>
+      <div className="grid grid-cols-2 gap-2">
+        {engines.map((item) => <button aria-pressed={engine === item.id} className={cn("flex flex-col items-start gap-1 rounded-md border px-3 py-2.5 text-left text-xs transition-colors", engine === item.id ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} key={item.id} onClick={() => setEngine(item.id)} type="button"><span className="flex w-full items-center justify-between gap-2"><strong className="font-medium">{t(locale, item.labelKey)}</strong>{engine === item.id && <Check className="size-3.5 shrink-0 text-primary" />}</span><small className="text-muted-foreground">{t(locale, item.noteKey)}</small></button>)}
       </div>
     </ControlSection>
     <Separator />
-    <ControlSection eyebrow={t(locale, "controls.style.eyebrow")} title={t(locale, "controls.style.title")}>
-      <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/50 p-1">{styles.map((item) => <Button className={cn(style === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setStyle(item.id)} title={t(locale, item.noteKey)} type="button" variant="ghost" size="sm">{t(locale, item.labelKey)}</Button>)}</div>
+    <ControlSection eyebrow={t(locale, "controls.voice.eyebrow")} title={t(locale, "controls.voice.title")}>
+      <div className="grid max-h-52 gap-1 overflow-auto pr-1">
+        {(!isVoxCpm || voxcpmVersion === "voxcpm2") && <button aria-pressed={!synthesisCharacterId} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", !synthesisCharacterId ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} onClick={() => setSynthesisCharacterId("")} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{isVoxCpm ? t(locale, "voxcpm.defaultVoice") : t(locale, "character.defaultVoice")}</strong><small className="truncate text-muted-foreground">{isVoxCpm ? t(locale, "voxcpm.defaultVoiceNote") : t(locale, "character.defaultVoiceNote")}</small></span>{!synthesisCharacterId && <Check className="size-3.5 shrink-0 text-primary" />}</button>}
+        {characters.map((character) => <button aria-pressed={synthesisCharacterId === character.id} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", synthesisCharacterId === character.id ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} key={character.id} onClick={() => setSynthesisCharacterId(character.id)} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{character.name}</strong><small className="truncate text-muted-foreground">{character.promptText ? tF(locale, "character.promptReady", { count: character.promptText.length }) : t(locale, "character.promptMissing")}</small></span>{synthesisCharacterId === character.id && <Check className="size-3.5 shrink-0 text-primary" />}</button>)}
+      </div>
+      {engineNeedsCharacter && !synthesisCharacterId && <p className="text-[11px] leading-relaxed text-destructive">{t(locale, "voxcpm.needsCharacter")}</p>}
     </ControlSection>
     <Separator />
-    {ttsReady ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "tts.ready")}</p> : <ControlSection eyebrow={t(locale, "controls.model.eyebrow")} title={t(locale, "controls.tts.title")}>
-      <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
-      <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />{t(locale, "download.cosyvoice")}</Button>
-    </ControlSection>}
-    <Button disabled={busy !== null || !synthesisText.trim() || !ttsReady} onClick={onRun} type="button" size="lg">{busy === "synthesize" ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}{t(locale, "nav.synthesize.label")}</Button>
+    {isVoxCpm
+      ? <ControlSection eyebrow={t(locale, "controls.engine.eyebrow")} title={t(locale, "voxcpm.version.title")}>
+        <div className="grid gap-2">
+          <Label htmlFor="voxcpm-version" className="text-xs text-muted-foreground">{t(locale, "voxcpm.version.hint")}</Label>
+          <Select disabled={busy !== null} onValueChange={(value) => setVoxcpmVersion(value as VoxCpmVersion)} value={voxcpmVersion}>
+            <SelectTrigger id="voxcpm-version" className="h-9 w-full min-w-0"><SelectValue placeholder={t(locale, "voxcpm.version.title")} /></SelectTrigger>
+            <SelectContent>{voxcpmVersions.map((item) => { const model = voxcpmEngine?.models[item.id] ?? null; return <SelectItem key={item.id} value={item.id}>{t(locale, item.labelKey)} · {t(locale, item.noteKey)} · {tF(locale, "voxcpm.size", { size: (model?.sizeGb ?? 0).toFixed(1) })}</SelectItem>; })}</SelectContent>
+          </Select>
+          {voxcpmModel && <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
+            <span className="grid min-w-0 gap-0.5"><strong className="truncate text-xs font-medium">{t(locale, selectedVersion.labelKey)}</strong><small className="truncate text-[11px] text-muted-foreground">{tF(locale, "voxcpm.size", { size: voxcpmModel.sizeGb.toFixed(1) })} · {t(locale, selectedVersion.noteKey)}</small></span>
+            {voxcpmModel.ready ? <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-primary"><Check className="size-3" />{tF(locale, "voxcpm.ready", { label: t(locale, selectedVersion.labelKey) })}</span> : <Button disabled={busy !== null || Boolean(voxcpmEngine && !voxcpmEngine.runtime)} onClick={() => onInstallVoxCpm(voxcpmVersion)} type="button" variant="outline" size="sm"><Download className="size-3.5" />{tF(locale, "voxcpm.download", { size: voxcpmModel.sizeGb.toFixed(1) })}</Button>}
+          </div>}
+        </div>
+        {voxcpmEngine && !voxcpmEngine.runtime && <div className="grid gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs"><strong className="text-amber-600">{t(locale, "voxcpm.runtimeMissing")}</strong>{voxcpmEngine.runtimeError && <p className="break-all text-[11px] text-amber-700">{tF(locale, "voxcpm.runtimeError", { error: voxcpmEngine.runtimeError })}</p>}<Button disabled={busy !== null} onClick={onRetryVoxCpmRuntime} type="button" variant="outline" size="sm" className="w-fit"><Download className="size-3.5" />{t(locale, "voxcpm.runtimeInstall")}</Button><p className="text-[11px] text-muted-foreground">{t(locale, "voxcpm.envPrepHint")}</p></div>}
+        <p className="text-[11px] leading-relaxed text-muted-foreground">{t(locale, "voxcpm.verifyNote")}</p>
+      </ControlSection>
+      : <>
+        <ControlSection eyebrow={t(locale, "controls.style.eyebrow")} title={t(locale, "controls.style.title")}>
+          <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/50 p-1">{styles.map((item) => <Button className={cn(style === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setStyle(item.id)} title={t(locale, item.noteKey)} type="button" variant="ghost" size="sm">{t(locale, item.labelKey)}</Button>)}</div>
+        </ControlSection>
+        <Separator />
+        {engineReady ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "tts.ready")}</p> : <ControlSection eyebrow={t(locale, "controls.model.eyebrow")} title={t(locale, "controls.tts.title")}>
+          <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
+          <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />{t(locale, "download.cosyvoice")}</Button>
+        </ControlSection>}
+      </>}
+    {isVoxCpm && <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />}
+    <Button disabled={!canRun} onClick={onRun} type="button" size="lg">{busy === "synthesize" ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}{t(locale, "nav.synthesize.label")}</Button>
   </CardContent>;
 }
 
@@ -632,7 +706,7 @@ function SynthesisOutput({ busy, selected, syntheses, onSave }: { busy: string |
   return <CardContent className="flex h-full flex-col gap-4">
     <div className="flex items-center justify-between border-b pb-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "output.synthesis.eyebrow")}</p><h2 className="mt-0.5 text-sm font-semibold">{t(locale, "output.synthesis.title")}</h2></div>{current && (current.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.privatePreview")}</Badge>)}</div>
     <div className="grid flex-1 place-items-center">
-      {current ? <div className="grid w-full max-w-md gap-3"><div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"><div className="grid gap-0.5"><strong className="text-xs font-medium">{t(locale, "synthesis.current")}</strong><small className="text-[11px] text-muted-foreground">{tF(locale, "synthesis.detail", { style: styleLabel(locale, current.style), duration: current.duration.toFixed(1), time: timestamp(locale, current.createdAt) })}</small></div>{current.savedAssetId ? <Check className="size-4 text-primary" /> : null}</div><audio className="w-full" controls src={current.outputURL} /></div> : <div className="grid max-w-60 place-items-center gap-2 text-center text-sm text-muted-foreground"><Sparkles className="size-7 text-muted-foreground/60" /><p>{t(locale, "synthesis.empty")}</p></div>}
+      {current ? <div className="grid w-full max-w-md gap-3"><div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"><div className="grid gap-0.5"><strong className="text-xs font-medium">{engineLabel(locale, current.engine)} · {t(locale, "synthesis.current")}</strong><small className="text-[11px] text-muted-foreground">{tF(locale, "synthesis.detail", { style: styleLabel(locale, current.style), duration: current.duration.toFixed(1), time: timestamp(locale, current.createdAt) })}</small></div>{current.savedAssetId ? <Check className="size-4 text-primary" /> : null}</div><audio className="w-full" controls src={current.outputURL} /></div> : <div className="grid max-w-60 place-items-center gap-2 text-center text-sm text-muted-foreground"><Sparkles className="size-7 text-muted-foreground/60" /><p>{t(locale, "synthesis.empty")}</p></div>}
     </div>
     {current && <div className="flex items-center justify-between gap-3 border-t pt-3"><p className="text-xs text-muted-foreground">{t(locale, "synthesis.listenHint")}</p>{current.savedAssetId ? <Badge variant="secondary">{t(locale, "badge.savedInLibrary")}</Badge> : <Button disabled={busy !== null} onClick={() => onSave(current)} type="button" size="sm">{busy === "save" ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}{t(locale, "save.toLibrary")}</Button>}</div>}
   </CardContent>;
@@ -672,7 +746,7 @@ function HistoryCharacterCard({ item, onOpen }: { item: VoiceCharacter; onOpen: 
 
 function HistorySynthesisCard({ item, onOpen }: { item: Synthesis; onOpen: (item: Synthesis) => void }) {
   const locale = useRecutLocale();
-  return <button aria-label={t(locale, "history.synthesis.open")} className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{tF(locale, "history.synthesis.title", { style: styleLabel(locale, item.style) })}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{tF(locale, "history.duration", { duration: item.duration.toFixed(1), time: timestamp(locale, item.createdAt) })}</p></div>{item.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div><p className="line-clamp-2 text-[11px] text-muted-foreground">{item.text}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">{t(locale, "history.open")}</p></button>;
+  return <button aria-label={t(locale, "history.synthesis.open")} className="group grid w-full gap-2 rounded-lg border bg-card p-3 text-left shadow-none transition-colors hover:border-primary/50 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onOpen(item)} type="button"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-semibold">{tF(locale, "history.synthesis.title", { style: styleLabel(locale, item.style) })}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{tF(locale, "history.duration", { duration: item.duration.toFixed(1), time: timestamp(locale, item.createdAt) })}</p></div><div className="flex shrink-0 items-center gap-1.5"><Badge variant="secondary">{engineLabel(locale, item.engine)}</Badge>{item.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div></div><p className="line-clamp-2 text-[11px] text-muted-foreground">{item.text}</p><p className="text-[11px] text-primary opacity-0 transition-opacity group-hover:opacity-100">{t(locale, "history.open")}</p></button>;
 }
 
 function HistoryPreviewDialog({ busy, onClose, onEditSegment, onSaveCharacter, onSaveSynthesis, onSaveTranscript, preview }: { busy: string | null; onClose: () => void; onEditSegment: (index: number, text: string) => void; onSaveCharacter: (character: VoiceCharacter) => void; onSaveSynthesis: (synthesis: Synthesis) => void; onSaveTranscript: (transcript: TranscriptDetail) => void; preview: HistoryPreview }) {
