@@ -86,15 +86,24 @@ function isActiveJob(status) { return ACTIVE_JOB_STATUSES.has(status); }
 function isTerminalJob(status) { return TERMINAL_JOB_STATUSES.has(status); }
 function outputStatus(status) { return status === "completed" ? "completed" : "failed"; }
 
-function settleOutput(ctx, action, recordID, job) {
+function settleOutput(ctx, action, recordID, job, jobID = "") {
   if (!recordID || !isTerminalJob(job.status)) return;
   const table = RECORD_TABLES[action];
   if (!table) return;
-  ctx.sqlite.execute(`update ${table} set status = ?, error = ? where id = ?`, [outputStatus(job.status), job.error || job.status, recordID]);
+  const detail = String(job.error || job.status || "failed");
+  let errorText = detail;
+  // 失败时把 shell job 日志尾部的真实原因存进记录，避免 UI 只看到平台笼统的 "exit status 1"。
+  if (job.status === "failed" && jobID) {
+    try {
+      const meaningful = meaningfulError(ctx, ctx.shell.logs(jobID).slice(-80), detail);
+      if (meaningful) errorText = meaningful;
+    } catch (_) { /* 日志不可读时保留 detail */ }
+  }
+  ctx.sqlite.execute(`update ${table} set status = ?, error = ? where id = ?`, [outputStatus(job.status), errorText, recordID]);
 }
 
 function resolveTrackedJob(ctx, record, job) {
-  settleOutput(ctx, record.action, record.record_id, job);
+  settleOutput(ctx, record.action, record.record_id, job, record.job_id);
   const logs = ctx.shell.logs(record.job_id).slice(-80);
   noteEnvOutcome(ctx, record, job, logs);
   return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: job.status, error: job.error || "", logs };
@@ -114,14 +123,14 @@ function trackedJob(ctx) {
   catch (error) {
     const message = error instanceof Error ? error.message : "shell job is unavailable";
     const interrupted = { status: "interrupted", error: tr(ctx, `任务记录不可恢复：${message}`, `Task record cannot be recovered: ${message}`) };
-    settleOutput(ctx, record.action, record.record_id, interrupted);
+    settleOutput(ctx, record.action, record.record_id, interrupted, record.job_id);
     noteEnvOutcome(ctx, record, interrupted, []);
     return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
   }
   const status = shellJobStatus(job);
   if (!isActiveJob(status) && !isTerminalJob(status)) {
     const interrupted = { status: "interrupted", error: tr(ctx, `任务状态不可识别：${status || "empty"}`, `Task status unrecognized: ${status || "empty"}`) };
-    settleOutput(ctx, record.action, record.record_id, interrupted);
+    settleOutput(ctx, record.action, record.record_id, interrupted, record.job_id);
     noteEnvOutcome(ctx, record, interrupted, []);
     return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
   }
@@ -319,7 +328,20 @@ function transcript(input, ctx) {
   const rows = ctx.sqlite.query("select id, source_asset_id, source_kind, model, language, save_to_library, duration, created_at, srt_path, json_path, audio_path, saved_asset_id, status, error from audio_transcripts where id = ?", [id]);
   if (!rows.length) throw new Error("Audio transcript was not found.");
   const row = rows[0];
-  if (row.status !== "completed") return { id: row.id, status: row.status, error: row.error || "" };
+  if (row.status !== "completed") {
+    // 旧记录可能有平台笼统的 "exit status 1"：借 job 日志尾巴补一次可读错误。
+    let errorText = String(row.error || "");
+    if (row.status === "failed" && row.job_id && errorText) {
+      try {
+        const meaningful = meaningfulError(ctx, ctx.shell.logs(row.job_id).slice(-80), errorText);
+        if (meaningful && meaningful !== errorText) {
+          ctx.sqlite.execute("update audio_transcripts set error = ? where id = ?", [meaningful, id]);
+          errorText = meaningful;
+        }
+      } catch (_) { /* 日志不可读时保留原错误 */ }
+    }
+    return { id: row.id, status: row.status, error: errorText };
+  }
   let savedAssetId = row.saved_asset_id || "";
   if (String(row.save_to_library || "").trim() === "1" || row.save_to_library === 1) {
     savedAssetId = finalizeSaveToLibrary(ctx, row) || savedAssetId;
