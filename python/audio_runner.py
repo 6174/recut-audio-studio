@@ -599,7 +599,17 @@ def transcribe_qwen(model_id: str, audio: Path, language: str) -> tuple[list, st
     if not results:
         raise RuntimeError("Qwen 未返回转写结果。")
     result = results[0]
-    entries = qwen_segments(getattr(result, "time_stamps", None), duration)
+    try:
+        entries = qwen_segments(getattr(result, "time_stamps", None), duration)
+    except RuntimeError:
+        # Qwen 离线时间戳对齐器对无内容/近静音音频常返回空。若已装 Whisper，
+        # 回退用 Whisper 的 VAD + 真实时间戳，保证任务仍产出可读字幕。
+        for fallback in WHISPER_MODELS:
+            if not downloaded_whisper(fallback):
+                continue
+            print(f"[audio] {model_id} 时间戳对齐失败（{duration:.1f}s），回退 {fallback} 生成带时间戳转写。", flush=True)
+            return transcribe_whisper(fallback, audio, language)
+        raise
     for entry in entries:
         print(f"[audio] {format_timecode(entry['start'])} → {format_timecode(entry['end'])}：{entry['text']}", flush=True)
     return entries, str(getattr(result, "language", "")), 1.0, duration
