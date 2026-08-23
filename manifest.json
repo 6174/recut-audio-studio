@@ -134,6 +134,34 @@
       "capability": true,
       "description": "停止当前正在运行的声音工坊本地任务，并保留终态日志。",
       "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "audio.tasks.list",
+      "surfaces": ["api", "mcp"],
+      "capability": true,
+      "description": "任务中心主列表：统一返回所有声音工坊任务（环境安装、模型下载、转写、角色、配音），支持按来源（ai/manual）与状态过滤、日期倒序分页。",
+      "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "enum": ["ai", "manual"] }, "status": { "type": "string", "enum": ["running", "queued", "done", "failed"] }, "action": { "type": "string" }, "cursor": { "type": "string" }, "limit": { "type": "number" } } }
+    },
+    {
+      "name": "audio.task.get",
+      "surfaces": ["api", "mcp"],
+      "capability": true,
+      "description": "读取单条任务中心的完整信息（来源、状态、结构化 meta、日志路径与关联产物）。",
+      "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
+    },
+    {
+      "name": "audio.task.logs",
+      "surfaces": ["api", "mcp"],
+      "capability": true,
+      "description": "读取单条任务的持久日志（tasks/${id}.log 的 JSON-lines，带时间戳与等级），支持按行分页，任务结束后仍可回看。",
+      "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" }, "cursor": { "type": "number" }, "limit": { "type": "number" } } }
+    },
+    {
+      "name": "audio.task.cancel",
+      "surfaces": ["api", "mcp"],
+      "capability": true,
+      "description": "按任务中心 id 停止正在运行的任务（经底层 shell job 取消）。",
+      "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
     }
   ]
 }

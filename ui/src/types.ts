@@ -24,3 +24,36 @@ export type TranscriptSummary = { id: string; sourceAssetId: string; sourceKind:
 export type TranscriptDetail = TranscriptSummary & { segments: TranscriptSegment[]; srt: string; status?: string; error?: string };
 export type VoiceCharacter = { id: string; name: string; model: SpeechModel; promptText: string; sampleAssetId: string; createdAt: string; sampleURL: string };
 export type Synthesis = { id: string; characterId: string; text: string; style: VoiceStyle; engine: TtsEngine; savedAssetId: string; createdAt: string; outputURL: string; duration: number };
+
+// ---- 任务中心（v2 统一任务账本，见 rfc/2026-08-23-task-center-ux.md）----
+export type TaskSource = "ai" | "manual";
+export type TaskState = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type TaskAction = "prepare" | "install" | "transcribe" | "character" | "synthesize";
+export type TaskMeta = {
+  type?: string;
+  engine?: string;
+  model?: string;
+  language?: string;
+  characterId?: string;
+  characterName?: string;
+  sourceAssetId?: string;
+  sourceKind?: string;
+  sizeGb?: number | null;
+  durationSec?: number | null;
+  [key: string]: unknown;
+};
+export type TaskSummary = {
+  id: string;
+  action: TaskAction;
+  name: string;
+  recordId: string;
+  source: TaskSource;
+  submittedBy: string;
+  state: TaskState;
+  progress: number;
+  createdAt: string;
+  meta: TaskMeta;
+};
+export type TaskLogEntry = { index: number; ts: string; level: "info" | "warn" | "error" | "ok"; message: string };
+export type TaskListResult = { tasks: TaskSummary[]; nextCursor: string | null };
+export type TaskLogResult = { logs: TaskLogEntry[]; nextCursor: number | null };

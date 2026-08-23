@@ -1,0 +1,8 @@
+{"ts": "2026-08-23T01:19:48Z", "level": "info", "message": "正在抽取音频轨道。"}
+{"ts": "2026-08-23T01:19:51Z", "level": "info", "message": "正在加载 qwen3-asr-0.6b 模型。"}
+{"ts": "2026-08-23T01:19:51Z", "level": "info", "message": "开始转写。"}
+{"ts": "2026-08-23T01:19:51Z", "level": "info", "message": "正在加载 qwen3-asr-0.6b 模型。"}
+{"ts": "2026-08-23T01:19:59Z", "level": "warn", "message": "正在加载 qwen3-asr-0.6b 模型仍在进行（已等待 8s）。"}
+{"ts": "2026-08-23T01:20:02Z", "level": "ok", "message": "正在加载 qwen3-asr-0.6b 模型完成（耗时 10s）。"}
+{"ts": "2026-08-23T01:20:02Z", "level": "info", "message": "qwen3-asr-0.6b 正在识别 7.7 秒音频。"}
+{"ts": "2026-08-23T01:20:02Z", "level": "info", "message": "qwen3-asr-0.6b 正在识别 7.7 秒音频已中止（耗时 0s）。"}

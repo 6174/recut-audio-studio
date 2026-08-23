@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>声音工坊 · v2 UX 原型</title>
+<style>
+  :root {
+    --background: oklch(0.145 0.012 150);
+    --foreground: oklch(0.95 0.008 150);
+    --card: oklch(0.185 0.012 150);
+    --popover: oklch(0.205 0.014 150);
+    --primary: oklch(0.68 0.18 151);
+    --primary-foreground: oklch(0.12 0.012 150);
+    --secondary: oklch(0.235 0.016 150);
+    --muted: oklch(0.225 0.012 150);
+    --muted-foreground: oklch(0.68 0.012 150);
+    --accent: oklch(0.28 0.06 151);
+    --destructive: oklch(0.58 0.18 28);
+    --success: oklch(0.64 0.16 151);
+    --warning: oklch(0.77 0.16 82);
+    --border: oklch(0.32 0.014 150);
+    --input: oklch(0.3 0.014 150);
+    --ring: oklch(0.68 0.18 151);
+    --terminal: oklch(0.12 0.008 150);
+    --terminal-fg: oklch(0.9 0.02 150);
+    --radius-sm: 0.5rem;
+    --radius-md: 0.625rem;
+    --radius-lg: 0.75rem;
+    --font-sans: Inter, "PingFang SC", "Noto Sans SC", Arial, sans-serif;
+    --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { font-family: var(--font-sans); background: var(--background); color: var(--foreground); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; overflow: hidden; }
+  ::selection { background: var(--accent); color: var(--foreground); }
+
+  .app { display: grid; grid-template-rows: 48px 1fr; height: 100vh; }
+
+  .header { display: flex; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--border); background: var(--card); }
+  .header .logo { width: 28px; height: 28px; border-radius: var(--radius-sm); background: linear-gradient(135deg, var(--primary), oklch(0.55 0.18 151)); display: flex; align-items: center; justify-content: center; color: var(--primary-foreground); font-weight: 700; font-size: 13px; }
+  .header h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.2px; }
+  .header .sub { color: var(--muted-foreground); font-size: 12px; }
+  .header .spacer { flex: 1; }
+  .header .env { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--muted); color: var(--muted-foreground); font-size: 12px; }
+  .env .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+
+  /* center column: launcher bar sits at its top */
+  .launch-bar { display: flex; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+  .launch-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--secondary); color: var(--foreground); cursor: pointer; font-size: 13px; font-family: inherit; transition: 0.12s ease; }
+  .launch-btn:hover { background: var(--muted); border-color: var(--ring); }
+  .launch-btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; font-weight: 600; }
+  .launch-btn.primary:hover { background: oklch(0.72 0.18 151); }
+  .main { display: grid; grid-template-columns: 1fr 380px; min-height: 0; }
+
+  .tasks { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); }
+  .tasks-bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .tasks-bar .title { font-size: 13px; font-weight: 600; }
+  .tasks-bar .count { color: var(--muted-foreground); font-size: 12px; }
+  .tasks-bar .spacer { flex: 1; }
+  .filter { display: flex; background: var(--muted); border-radius: var(--radius-sm); padding: 2px; }
+  .filter button { border: none; background: transparent; color: var(--muted-foreground); font-size: 12px; padding: 4px 10px; border-radius: calc(var(--radius-sm) - 2px); cursor: pointer; font-family: inherit; }
+  .filter button.active { background: var(--secondary); color: var(--foreground); }
+
+  .tasks-scroll { overflow-y: auto; padding: 8px 16px 24px; flex: 1; }
+  .day-group { margin-top: 14px; }
+  .day-label { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.6px; margin: 8px 0; position: sticky; top: 0; background: var(--background); padding: 4px 0; }
+  .day-label::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+  .task { border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--card); padding: 12px 14px; margin-bottom: 8px; cursor: pointer; transition: 0.12s ease; }
+  .task:hover { border-color: var(--ring); }
+  .task.selected { border-color: var(--ring); box-shadow: 0 0 0 1px var(--ring); }
+  .task-head { display: flex; align-items: center; gap: 10px; }
+  .task-icon { width: 34px; height: 34px; border-radius: var(--radius-sm); flex-shrink: 0; display: flex; align-items: center; justify-content: center; background: var(--muted); color: var(--foreground); }
+  .task-icon.env { background: oklch(0.3 0.08 250 / 0.4); color: oklch(0.8 0.1 250); }
+  .task-icon.model { background: oklch(0.3 0.1 82 / 0.35); color: var(--warning); }
+  .task-icon.transcribe { background: oklch(0.3 0.12 151 / 0.4); color: var(--success); }
+  .task-icon.synth { background: oklch(0.3 0.12 330 / 0.4); color: oklch(0.8 0.14 330); }
+  .task-icon.character { background: oklch(0.3 0.1 200 / 0.4); color: oklch(0.8 0.12 200); }
+  .task-title { flex: 1; min-width: 0; }
+  .task-title .name { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .task-title .meta { font-size: 12px; color: var(--muted-foreground); }
+  .task .right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; border: 1px solid var(--border); color: var(--muted-foreground); }
+  .badge.ai { background: oklch(0.3 0.12 280 / 0.3); color: oklch(0.82 0.13 280); border-color: transparent; }
+  .badge.manual { background: oklch(0.3 0.1 151 / 0.3); color: var(--success); border-color: transparent; }
+  .badge.running { background: oklch(0.3 0.14 82 / 0.3); color: var(--warning); border-color: transparent; }
+  .badge.done { background: oklch(0.3 0.13 151 / 0.3); color: var(--success); border-color: transparent; }
+  .badge.failed { background: oklch(0.3 0.16 28 / 0.3); color: var(--destructive); border-color: transparent; }
+  .badge.queued { background: var(--muted); color: var(--muted-foreground); border-color: transparent; }
+
+  .progress { height: 4px; border-radius: 999px; background: var(--muted); margin-top: 10px; overflow: hidden; }
+  .progress > span { display: block; height: 100%; background: var(--primary); border-radius: 999px; }
+
+  .detail { display: flex; flex-direction: column; min-height: 0; }
+  .detail-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted-foreground); text-align: center; padding: 24px; }
+  .detail-head { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .detail-head .name { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  .detail-head .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .detail-body { flex: 1; overflow-y: auto; padding: 14px 16px; }
+
+  .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; margin-bottom: 18px; }
+  .meta-item .k { font-size: 11px; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.5px; }
+  .meta-item .v { font-size: 13px; margin-top: 2px; word-break: break-all; }
+
+  .section-title { font-size: 12px; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.6px; margin: 16px 0 8px; display: flex; align-items: center; gap: 8px; }
+  .section-title .line { flex: 1; height: 1px; background: var(--border); }
+
+  .logs { background: var(--terminal); color: var(--terminal-fg); border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 12px; line-height: 1.7; padding: 10px 12px; max-height: 280px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  .logs .ts { color: oklch(0.55 0.02 150); }
+  .logs .lv-info { color: var(--terminal-fg); }
+  .logs .lv-warn { color: var(--warning); }
+  .logs .lv-err { color: var(--destructive); }
+  .logs .lv-ok { color: var(--success); }
+
+  .overlay { position: fixed; inset: 0; background: oklch(0.1 0.008 150 / 0.6); backdrop-filter: blur(2px); display: none; align-items: center; justify-content: center; z-index: 50; }
+  .overlay.open { display: flex; }
+  .modal { width: 460px; max-width: calc(100vw - 32px); max-height: calc(100vh - 64px); background: var(--popover); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: 0 14px 36px oklch(0.19 0.008 150 / 0.4); display: flex; flex-direction: column; overflow: hidden; }
+  .modal-head { display: flex; align-items: center; gap: 10px; padding: 16px; border-bottom: 1px solid var(--border); }
+  .modal-head .mtitle { font-size: 15px; font-weight: 600; }
+  .modal-head .mdesc { font-size: 12px; color: var(--muted-foreground); }
+  .modal-head .close { margin-left: auto; cursor: pointer; color: var(--muted-foreground); background: transparent; border: none; padding: 4px; border-radius: var(--radius-sm); }
+  .modal-head .close:hover { background: var(--muted); color: var(--foreground); }
+  .modal-body { padding: 16px; overflow-y: auto; }
+  .modal-foot { padding: 14px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 12px; color: var(--muted-foreground); margin-bottom: 6px; }
+  .field input, .field select, .field textarea { width: 100%; background: var(--background); border: 1px solid var(--input); color: var(--foreground); border-radius: var(--radius-sm); padding: 8px 10px; font-family: inherit; font-size: 13px; }
+  .field textarea { min-height: 90px; resize: vertical; }
+  .field select { cursor: pointer; }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--ring); }
+
+  .btn { font-family: inherit; font-size: 13px; padding: 8px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--secondary); color: var(--foreground); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { background: var(--muted); }
+  .btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; font-weight: 600; }
+  .btn.ghost { background: transparent; }
+
+  .opt-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .opt { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; cursor: pointer; background: var(--background); transition: 0.12s ease; }
+  .opt:hover { border-color: var(--ring); }
+  .opt.sel { border-color: var(--ring); background: var(--accent); }
+  .opt .on { font-size: 13px; font-weight: 600; }
+  .opt .od { font-size: 11px; color: var(--muted-foreground); margin-top: 2px; }
+
+  .hint { font-size: 11px; color: var(--muted-foreground); margin-top: 6px; }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 999px; border: 2px solid var(--background); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--border); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo">声</div>
+    <h1>声音工坊</h1>
+    <span class="sub">v2 · 任务中心</span>
+    <div class="spacer"></div>
+    <div class="env"><span class="dot"></span> 运行环境就绪</div>
+  </header>
+
+  <main class="main">
+    <section class="tasks">
+      <div class="launch-bar" id="launchBar">
+        <button class="launch-btn primary" data-action="transcribe">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+          转写
+        </button>
+        <button class="launch-btn" data-action="character">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/></svg>
+          建角色
+        </button>
+        <button class="launch-btn" data-action="synthesize">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+          配音
+        </button>
+        <button class="launch-btn" data-action="library">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+          素材库
+        </button>
+      </div>
+
+      <div class="tasks-bar">
+        <span class="title">任务</span>
+        <span class="count" id="taskCount"></span>
+        <div class="spacer"></div>
+        <div class="filter" id="filter">
+          <button class="active" data-f="all">全部</button>
+          <button data-f="running">进行中</button>
+          <button data-f="ai">AI</button>
+          <button data-f="manual">手动</button>
+        </div>
+      </div>
+      <div class="tasks-scroll" id="taskList"></div>
+    </section>
+
+    <aside class="detail" id="detail">
+      <div class="detail-empty">从左侧选择一个任务查看详情<br/>或使用顶部按钮发起新任务</div>
+    </aside>
+  </main>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="modal" id="modal"></div>
+</div>
+<script>
+const ICONS = {
+  env: { cls: "env", svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/></svg>' },
+  model: { cls: "model", svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' },
+  transcribe: { cls: "transcribe", svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>' },
+  synth: { cls: "synth", svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/></svg>' },
+  character: { cls: "character", svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/></svg>' },
+};
+
+let TASKS = [
+  { id: "t-001", kind: "env", icon: "env", name: "安装 VoxCPM2 运行环境", source: "ai", status: "running", progress: 62, date: "2026-08-22", time: "14:32", elapsed: "03:21",
+    meta: { "类型": "运行环境", "引擎": "VoxCPM2", "来源": "AI 自动化", "提交方": "agent:recut-audio" },
+    logs: [
+      { ts: "14:29:10", lv: "info", t: "拉取 VoxCPM2 专属 venv 运行环境…" },
+      { ts: "14:29:48", lv: "info", t: "venv 就绪 (/venv/voxcpm2)" },
+      { ts: "14:30:30", lv: "ok", t: "pip 依赖解析完成：38 个包" },
+      { ts: "14:31:05", lv: "info", t: "下载 cosyvoice 官方代码… 62%" },
+      { ts: "14:32:01", lv: "warn", t: "modelscope 连接较慢，自动回退镜像" },
+    ] },
+  { id: "t-002", kind: "model", icon: "model", name: "下载 Whisper Large-v3 权重", source: "manual", status: "done", progress: 100, date: "2026-08-22", time: "13:10", elapsed: "04:52",
+    meta: { "类型": "ASR 模型", "模型": "whisper-large-v3", "来源": "手动提交", "提交方": "user:chenxuejia" },
+    logs: [
+      { ts: "13:10:01", lv: "info", t: "开始下载 whisper-large-v3 (约 1.5GB)" },
+      { ts: "13:14:22", lv: "info", t: "下载进度 45%" },
+      { ts: "13:18:55", lv: "ok", t: "校验通过，已注册到本地模型库" },
+    ] },
+  { id: "t-003", kind: "transcribe", icon: "transcribe", name: "转写：产品发布.mp4", source: "ai", status: "done", progress: 100, date: "2026-08-22", time: "11:02", elapsed: "02:14",
+    meta: { "类型": "转写", "模型": "qwen3-asr-1.7b", "语言": "auto", "来源": "AI 自动化", "提交方": "agent:recut-editor" },
+    logs: [
+      { ts: "11:02:10", lv: "info", t: "解析素材 assetId=a-2291" },
+      { ts: "11:03:40", lv: "info", t: "识别 184 段，估算时长 18:22" },
+      { ts: "11:04:24", lv: "ok", t: "生成 transcript.json + SRT" },
+    ] },
+  { id: "t-004", kind: "synth", icon: "synth", name: "配音：开场白 (角色·晓琳)", source: "manual", status: "failed", progress: 30, date: "2026-08-21", time: "19:45", elapsed: "00:41",
+    meta: { "类型": "配音合成", "引擎": "cosyvoice2", "声音角色": "晓琳", "来源": "手动提交", "提交方": "user:chenxuejia" },
+    logs: [
+      { ts: "19:45:02", lv: "info", t: "加载角色参考音 v-77" },
+      { ts: "19:45:20", lv: "info", t: "推理中… 30%" },
+      { ts: "19:45:43", lv: "err", t: "GPU OOM：显存不足，推理中断" },
+    ] },
+  { id: "t-005", kind: "character", icon: "character", name: "创建声音角色：晓琳", source: "manual", status: "done", progress: 100, date: "2026-08-21", time: "18:30", elapsed: "01:05",
+    meta: { "类型": "声音角色", "参考音": "asset:a-1980", "来源": "手动提交", "提交方": "user:chenxuejia" },
+    logs: [
+      { ts: "18:30:01", lv: "info", t: "截取连续人声 12s" },
+      { ts: "18:30:40", lv: "ok", t: "声纹验证通过，角色已创建" },
+    ] },
+  { id: "t-006", kind: "model", icon: "model", name: "下载 VoxCPM2 权重", source: "ai", status: "queued", progress: 0, date: "2026-08-21", time: "17:12", elapsed: "—",
+    meta: { "类型": "TTS 模型", "模型": "voxcpm2", "大小": "约 5.0GB", "来源": "AI 自动化", "提交方": "agent:recut-audio" },
+    logs: [ { ts: "17:12:00", lv: "info", t: "已加入队列，等待运行环境就绪" } ] },
+  { id: "t-007", kind: "transcribe", icon: "transcribe", name: "转写：访谈录音.wav", source: "manual", status: "done", progress: 100, date: "2026-08-20", time: "10:08", elapsed: "03:30",
+    meta: { "类型": "转写", "模型": "whisper-medium", "语言": "zh", "来源": "手动提交", "提交方": "user:chenxuejia" },
+    logs: [
+      { ts: "10:08:00", lv: "info", t: "开始转写访谈录音.wav" },
+      { ts: "10:11:30", lv: "ok", t: "完成，已保存为素材库 transcript" },
+    ] },
+];
+
+let selectedId = null;
+let currentFilter = "all";
+const taskListEl = document.getElementById("taskList");
+const detailEl = document.getElementById("detail");
+const countEl = document.getElementById("taskCount");
+
+function statusBadge(s) {
+  if (s === "running") return '<span class="badge running">进行中</span>';
+  if (s === "done") return '<span class="badge done">已完成</span>';
+  if (s === "failed") return '<span class="badge failed">失败</span>';
+  if (s === "queued") return '<span class="badge queued">排队中</span>';
+  return '<span class="badge">' + s + '</span>';
+}
+function matchesFilter(t) {
+  if (currentFilter === "all") return true;
+  if (currentFilter === "running") return t.status === "running" || t.status === "queued";
+  if (currentFilter === "ai") return t.source === "ai";
+  if (currentFilter === "manual") return t.source === "manual";
+  return true;
+}
+function renderList() {
+  const visible = TASKS.filter(matchesFilter);
+  countEl.textContent = "· " + visible.length + " 条";
+  if (!visible.length) { taskListEl.innerHTML = '<div style="color:var(--muted-foreground);padding:24px;text-align:center">没有匹配的任务</div>'; return; }
+  const groups = {};
+  visible.forEach(t => { (groups[t.date] = groups[t.date] || []).push(t); });
+  const dates = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+  let html = "";
+  dates.forEach(d => {
+    html += '<div class="day-group"><div class="day-label">' + d + '</div>';
+    groups[d].forEach(t => {
+      const ic = ICONS[t.icon];
+      const sourceBadge = t.source === "ai" ? '<span class="badge ai">AI</span>' : '<span class="badge manual">手动</span>';
+      const extra = (t.meta.引擎 ? " · " + t.meta.引擎 : "") + (t.meta.模型 ? " · " + t.meta.模型 : "");
+      const prog = (t.status === "running" || t.status === "queued") ? '<div class="progress"><span style="width:' + t.progress + '%"></span></div>' : "";
+      html += '<div class="task ' + (t.id === selectedId ? "selected" : "") + '" data-id="' + t.id + '">' +
+        '<div class="task-head"><div class="task-icon ' + ic.cls + '">' + ic.svg + '</div>' +
+        '<div class="task-title"><div class="name">' + t.name + '</div><div class="meta">' + t.time + " · " + t.elapsed + extra + '</div></div>' +
+        '<div class="right">' + sourceBadge + statusBadge(t.status) + '</div></div>' + prog + '</div>';
+    });
+    html += '</div>';
+  });
+  taskListEl.innerHTML = html;
+  taskListEl.querySelectorAll(".task").forEach(el => { el.addEventListener("click", () => selectTask(el.dataset.id)); });
+}
+function renderDetail() {
+  const t = TASKS.find(x => x.id === selectedId);
+  if (!t) { detailEl.innerHTML = '<div class="detail-empty">从左侧选择一个任务查看详情<br/>或使用顶部按钮发起新任务</div>'; return; }
+  const ic = ICONS[t.icon];
+  const metaRows = Object.entries(t.meta).map(([k, v]) => '<div class="meta-item"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>').join("");
+  const logsHtml = t.logs.map(l => '<div><span class="ts">' + l.ts + '</span> <span class="lv-' + l.lv + '">' + l.t + '</span></div>').join("");
+  detailEl.innerHTML = '<div class="detail-head"><div class="name"><span class="task-icon ' + ic.cls + '" style="width:28px;height:28px">' + ic.svg + '</span> ' + t.name + '</div>' +
+    '<div class="row">' + (t.source === "ai" ? '<span class="badge ai">AI 提交</span>' : '<span class="badge manual">手动提交</span>') + " " + statusBadge(t.status) + '</div></div>' +
+    '<div class="detail-body"><div class="section-title">任务信息</div><div class="meta-grid">' + metaRows + '</div>' +
+    '<div class="section-title">日志 Logs</div><div class="logs">' + logsHtml + '</div></div>';
+}
+function selectTask(id) { selectedId = id; renderList(); renderDetail(); }
+
+document.getElementById("filter").addEventListener("click", e => {
+  const btn = e.target.closest("button"); if (!btn) return;
+  document.querySelectorAll("#filter button").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active"); currentFilter = btn.dataset.f; renderList();
+});
+const MODALS = {
+  transcribe: { title: "转写音视频", desc: "把音视频素材转成文稿与字幕",
+    body: '<div class="field"><label>素材来源</label><select><option>从素材库选择…</option><option>上传本地文件</option><option>粘贴媒体链接</option></select></div>' +
+      '<div class="field"><label>识别模型</label><select><option>qwen3-asr-1.7b</option><option>qwen3-asr-0.6b</option><option>whisper-large-v3</option><option>whisper-medium</option><option>whisper-small</option></select></div>' +
+      '<div class="field"><label>语言</label><select><option>自动检测</option><option>中文</option><option>英文</option></select></div>' +
+      '<div class="hint">提交后将在「任务」列表中出现一条记录，可实时查看日志。</div>',
+    confirm: "发起转写" },
+  character: { title: "创建声音角色", desc: "用一段参考音克隆音色",
+    body: '<div class="field"><label>角色名称</label><input placeholder="例如：晓琳" /></div>' +
+      '<div class="field"><label>参考音频</label><select><option>从素材库选择…</option><option>上传本地文件</option></select></div>' +
+      '<div class="hint">建议 10–30 秒、无背景噪音的连续人声，自动截取与声纹验证。</div>',
+    confirm: "创建角色" },
+  synthesize: { title: "配音合成", desc: "让声音角色朗读文本",
+    body: '<div class="field"><label>声音角色</label><select><option>晓琳</option><option>+ 新建角色</option></select></div>' +
+      '<div class="field"><label>引擎</label><select><option>cosyvoice2</option><option>voxcpm2</option><option>voxcpm1.5</option></select></div>' +
+      '<div class="field"><label>文本</label><textarea placeholder="输入要朗读的文本…"></textarea></div>' +
+      '<div class="hint">合成结果以任务形式记录，完成后可试听并保存为素材。</div>',
+    confirm: "开始合成" },
+  library: { title: "素材库", desc: "本地媒体 / 转写 / 角色资产",
+    body: '<div class="hint" style="margin:0">素材库面板原型占位：此处列出可复用的 audio / video / transcript / character 资产，拖入或点选后用于上方各类任务。</div>',
+    confirm: "完成" },
+};
+
+const overlay = document.getElementById("overlay");
+const modal = document.getElementById("modal");
+
+function openModal(action) {
+  const m = MODALS[action]; if (!m) return;
+  modal.innerHTML = '<div class="modal-head"><div><div class="mtitle">' + m.title + '</div><div class="mdesc">' + m.desc + '</div></div>' +
+    '<button class="close" id="closeX"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>' +
+    '<div class="modal-body">' + m.body + '</div>' +
+    '<div class="modal-foot"><button class="btn ghost" id="cancelBtn">取消</button><button class="btn primary" id="okBtn">' + m.confirm + '</button></div>';
+  overlay.classList.add("open");
+  document.getElementById("closeX").addEventListener("click", closeModal);
+  document.getElementById("cancelBtn").addEventListener("click", closeModal);
+  document.getElementById("okBtn").addEventListener("click", closeModal);
+}
+function closeModal() { overlay.classList.remove("open"); modal.innerHTML = ""; }
+overlay.addEventListener("click", e => { if (e.target === overlay) closeModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+
+document.getElementById("launchBar").addEventListener("click", e => {
+  const btn = e.target.closest(".launch-btn"); if (!btn) return;
+  openModal(btn.dataset.action);
+});
+
+renderList();
+</script>
+</body>
+</html>

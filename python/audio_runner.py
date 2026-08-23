@@ -20,6 +20,38 @@ import subprocess
 import sys
 import threading
 import time
+import builtins
+import datetime
+
+# 模块级日志 tee：重定向 stdout 到任务日志文件（JSON-lines，带 ts/level）。
+# 必须定义为模块级函数，否则子进程 fork/多进程 pickling 时按 `__main__._teed_print`
+# 查找会失败（报 “module '__main__' has no attribute '_print'”）。
+_ORIG_PRINT = builtins.print
+_TASK_LOG = None
+
+
+def _write_task_log(text: str) -> None:
+    if _TASK_LOG is None:
+        return
+    line = text.strip()
+    if not line or line.startswith("{"):  # 跳过最终单行 JSON 状态载荷
+        return
+    msg = line[len("[audio] "):] if line.startswith("[audio] ") else line
+    level = "info"
+    if any(w in msg for w in ("失败", "错误", "不可用", "异常")):
+        level = "error"
+    elif any(w in msg for w in ("完成", "就绪", "校验通过", "已下载", "已结束", "成功")):
+        level = "ok"
+    elif any(w in msg for w in ("较慢", "回退", "等待", "重试", "进行")):
+        level = "warn"
+    _TASK_LOG.write(json.dumps({"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "level": level, "message": msg}, ensure_ascii=False) + "\n")
+    _TASK_LOG.flush()
+
+
+def _teed_print(*a, **k):
+    _ORIG_PRINT(*a, **k)
+    if a:
+        _write_task_log(str(a[0]))
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -886,7 +918,21 @@ def main() -> None:
     synthesize_parser.add_argument("--style", choices=list(STYLES), default="neutral")
     synthesize_parser.add_argument("--engine", choices=["cosyvoice2"] + VOXCPM_MODELS, default="cosyvoice2")
     synthesize_parser.add_argument("--output", required=True)
+    # 任务日志输出必须挂在每个子命令 parser 上（argparse 子命令之后的选项不会回落到主 parser）；
+    # background 传递的用法是 `audio_runner.py <subcommand> ... --task-log tasks/<id>.log`。
+    for sub in (install_parser, transcribe_parser, character_parser, synthesize_parser):
+        sub.add_argument("--task-log", default="", help="可选：把进度同时以 JSON-lines 追加到该文件，供任务中心回看日志")
     args = parser.parse_args()
+
+    # 任务日志：把 [audio] 进度行同时写成 tasks/${id}.log 的 JSON-lines（带 ts/level）。
+    # stdout 仍照旧（平台 ctx.shell.logs 可实时取），文件副本在任务结束后仍可回看。
+    _task_log_path = Path(getattr(args, "task_log", "")) if getattr(args, "task_log", "") else None
+    if _task_log_path is not None:
+        _task_log_path.parent.mkdir(parents=True, exist_ok=True)
+        global _TASK_LOG
+        _TASK_LOG = open(_task_log_path, "a", encoding="utf-8")
+        builtins.print = _teed_print  # 模块级函数，可被子进程 pickle 安全引用
+
     try:
         if args.command == "status":
             emit(state(model_root()))
