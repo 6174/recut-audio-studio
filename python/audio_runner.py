@@ -926,7 +926,15 @@ def main() -> None:
 
     # 任务日志：把 [audio] 进度行同时写成 tasks/${id}.log 的 JSON-lines（带 ts/level）。
     # stdout 仍照旧（平台 ctx.shell.logs 可实时取），文件副本在任务结束后仍可回看。
-    _task_log_path = Path(getattr(args, "task_log", "")) if getattr(args, "task_log", "") else None
+    # 相对路径以 App 文件区（RECUT_APP_FILES_DIR，即 .recut/appstate/<appId>/files）为根解析，
+    # 与 transcripts/、syntheses/ 同处 App 私有数据；否则会落到 runner 的 CWD（App 源码目录）。
+    _task_log_arg = getattr(args, "task_log", "")
+    _task_log_path = None
+    if _task_log_arg:
+        _candidate = Path(_task_log_arg)
+        if not _candidate.is_absolute() and os.environ.get("RECUT_APP_FILES_DIR"):
+            _candidate = safe_file(_task_log_arg)
+        _task_log_path = _candidate
     if _task_log_path is not None:
         _task_log_path.parent.mkdir(parents=True, exist_ok=True)
         global _TASK_LOG
