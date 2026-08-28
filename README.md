@@ -1,53 +1,108 @@
-# 声音工坊 - 本地转写、声音角色与配音 App
+<div align="center">
 
-声音工坊是 Recut 的独立应用，把声音当作视频创作里的一级资源：
+<img src="./assets/logo.jpg" alt="Recut logo" width="112" />
 
-1. **转写**：选择素材库里的音频或视频，在本机用 Whisper 或 Qwen3-ASR 转写，产出可编辑文稿（`transcript.json`）和真实时间戳 SRT 字幕。
-2. **声音角色**：上传人声后，VoiceCloneEngine 自动预处理音频、选取 3~6 秒连续人声、验证波形与 CosyVoice 声纹，并仅为通过验收的片段生成角色提示词，形成可复用的声音角色。
-3. **配音**：输入文本即可用 CosyVoice 官方默认声音合成；也可选择已验收的声音角色，用 CosyVoice2 的声纹克隆路径合成角色朗读。配音步骤可选择 **VoxCPM** 引擎（VoxCPM2 / 1.5 / 0.5B 三档版本，含体积提示）：VoxCPM2 支持 30 语种与 Voice Design 默认音，VoxCPM1.5/0.5B 用延续式克隆朗读所选角色。
+# 声音工坊 · Audio Studio
 
-输出先保留在 App 私有文件区，用户点击保存后才创建素材库 Asset。
+**在本机把音视频转成字幕与文稿，用已授权的声音角色完成旁白与配音**
 
-## 使用流程
+Recut 的本地声音工作台 — 转写、声音角色与配音在同一条工作流中完成
 
-1. 在 **Apps** 中从 [recut-audio-studio](https://github.com/6174/recut-audio-studio) 安装并打开“声音工坊”。首次进入会自动准备 Python、FFmpeg 与模型：平台优先使用 manifest 指定的 **Python 3.11**，缺少时把受管版本安装到 Recut 数据目录；FFmpeg 同样在隔离环境中自动提供。随后创建 venv、安装锁定依赖与执行跨平台 App bootstrap（下载 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) 官方代码并安装其推理运行依赖），不会要求用户配置解释器、Homebrew、PATH 或 shell。
-2. **转写**：选择 Qwen3-ASR 0.6B / 1.7B 或 Whisper Small / Medium / Large-v3（可多选），选择 Hugging Face、ModelScope 或自动回退来源，下载后选择音频或视频素材与语言；生成后先查看文稿与字幕，再按需保存或复制。保存会创建 platform 的 `transcript` 素材：一个 bundle 同时包含与时间戳对齐的源声音轨、SRT 字幕与 transcript.json，可在素材库直接播放、按分段阅读或下载 SRT/JSON。Qwen 会同时安装官方时间戳对齐器。
-3. **声音角色**：确认已安装任一语音模型，从素材库选择一段人声音频，命名后创建角色；创建过程自动筛选短连续人声、验收波形和 CosyVoice 声纹，再生成角色提示词。未通过验收的输入不会创建角色。
-4. **配音**：确认已下载 CosyVoice2 权重，输入文本后可直接使用官方默认声音，或选择已验收的角色；生成后先试听私有预览，满意时保存到素材库。如需多语言 / Voice Design，可在配音步骤切换到 VoxCPM 引擎并下载对应版本权重（VoxCPM2 约 5.0GB / VoxCPM1.5 约 2.0GB / VoxCPM-0.5B 约 1.6GB），首次会先安装独立的 VoxCPM 运行环境（venv，安装过程在日志面板可见）。
+[中文](./README.md) · [English](./README.en.md)
 
-模型权重统一保存到 `~/.recut/models/audio-studio/`，venv 由平台保存到 `~/.recut/python/envs/recut.audio-studio/audio-studio/<fingerprint>/`。
+</div>
 
-## 本地依赖
+![Recut Audio Studio 声音工坊](./assets/audio-studio.jpg)
 
-`manifest.json` 的 `runtime.python` 是 ASR 环境声明：平台自动取得声明的 Python 版本与 FFmpeg，创建 venv、按完整版本闭包 `python/requirements.lock` 安装 Qwen 官方 `qwen-asr` 与 faster-whisper。`bootstrap.py` 随后用同一 Python 创建并维护同级的 CosyVoice 专属 venv，严格安装完整版本闭包 `python/cosyvoice.requirements.lock`（torch/torchaudio 2.3.1、transformers 4.51.3、numpy 1.26.4），与 Qwen 所需 transformers 4.57.6 彻底隔离；安装后必须通过 `pip check` 与 worker 版本自检。CosyVoice 和 Matcha-TTS 代码也固定到验收提交，不追随 `main`。`bootstrap.py` 还会尽力创建第三个 VoxCPM 专属 venv，安装 `python/voxcpm.requirements.lock` 的受管闭包（`voxcpm==2.0.3`，torch >=2.5；失败不阻断 prepare，状态由 `audio.status` 的 `engines.voxcpm.runtime` 暴露，可在配音步骤重试）。每次模型下载都可选择 Hugging Face 或 ModelScope；自动模式先尝试 Hugging Face，失败后改用 ModelScope。Whisper 权重来自 Systran/faster-whisper-*；Qwen 模型来自 Qwen/Qwen3-ASR-*，并配套 Qwen3-ForcedAligner-0.6B；CosyVoice2-0.5B 来自 FunAudioLLM/CosyVoice2-0.5B；VoxCPM 各版本来自 openbmb/VoxCPM*（HF）/ OpenBMB/VoxCPM*（ModelScope）。角色创建会合成自身提示词并 ASR 回读校准，最终任何引擎的 TTS 也必须完成“合成 -> Qwen3-ASR 回读 -> 文本保真度 >= 0.85”才会暴露 WAV；失败结果会被删除，不能进入历史或素材库。
+## 这是什么
 
-## 数据边界
+声音工坊是 Recut 的**独立声音 App**（`standalone` 类型）。它把声音当作视频创作的一级资源，在本机完成从听见、到复用到再创作的闭环：转写产出带时间戳的文稿与字幕，声音角色沉淀可复用的音色，配音把新文本读出来。
 
-| 数据 | 保存位置 |
-| --- | --- |
-| CosyVoice 官方代码、Whisper、Qwen3-ASR（含对齐器）、CosyVoice2 权重与 VoxCPM 各版本权重 | `~/.recut/models/audio-studio/` |
-| 平台 Python venv | `~/.recut/python/envs/recut.audio-studio/audio-studio/<fingerprint>/` |
-| 输入副本、文稿、SRT、源声音轨、角色参考音与未保存配音 | 当前独立 App 的私有文件沙箱 |
-| 用户明确保存的配音、角色参考音或转写 bundle（源声音 + SRT + JSON） | Recut 素材库，取得真实 `assetId` |
-| 转写 / 角色 / 合成记录 | 当前 App 的隔离 SQLite |
+- **先在本机听懂**：用 Whisper 或 Qwen3-ASR 在本地转写，不把原始音视频默认交给云端。
+- **结果先私有，确认后再入库**：转写、角色与配音先保留在 App 私有文件区，用户明确保存后才创建素材库 Asset。
+- **与剪辑器同源**：保存的 transcript 素材可直接在剪辑器中生成字幕轨、绑定文稿继续剪辑。
 
-> 跨 App 能力面：`audio.transcribe` / `audio.transcripts` / `audio.transcript` / `audio.status` 已在 manifest 标记 `capability: true`，可被其他 App 经平台通用能力桥（`ctx.capabilities.invoke`）复用。`audio.transcribe` 新增 `saveToLibrary` 开关（默认 `false` = 私有产物不自动入库；`true` = 完成时懒终态自动导入为全局 transcript 素材，幂等去重——编辑器「生成字幕」即一次调用转写+入库）。Agent 直连不传该开关，行为保持私有产物。
+> 通过 **Apps** 从 [recut-audio-studio](https://github.com/6174/recut-audio-studio) 安装。首次使用会自动准备 Python 3.11、FFmpeg 与模型（见 manifest `runtime.python`）。
 
-## 架构
+## 为什么用它
 
-```text
-ui/ -> background.js -> ctx.python / ctx.shell -> ShellJobManager -> python/audio_runner.py
-                          |                         |                     |
-                          |                         +-> project events   +-> ~/.recut/models/audio-studio/
-                          +-> App files/inputs, transcripts, characters, syntheses
+### 本地转写，时间戳可信
 
-素材库 Asset -> ctx.media.materialize -> 私有输入副本 -> Whisper / Qwen3-ASR / CosyVoice / VoxCPM 处理
-用户点击保存 -> ctx.media.importFile -> 素材库 Asset
-```
+基于 Whisper（Small / Medium / Large-v3）与 Qwen3-ASR（0.6B / 1.7B，含 Qwen3-ForcedAligner 时间戳对齐），产出 `transcript.json` 文稿与真实时间戳 SRT。所有合成输出需经 ASR 回读校准（文本保真度 ≥ 0.85）才进入历史。
 
-`background.js` 是唯一业务入口。它把模型下载源持久化在 App SQLite，把素材库输入 materialize 到私有目录、提交 Python Job、保存转写 / 角色 / 合成记录，并在 App SQLite 保留一个活动任务及其持久化日志；界面重连后通过 `audio.job` 恢复，任务可以由 `audio.cancel` 停止，只有处理完终态才以 `audio.resolve` 清除。CosyVoice 与 VoxCPM worker 的加载、参考音编码、推理分片和 WAV 写入会实时转发；若底层模型连续 8 秒无输出，主 worker 会持续输出运行心跳，因此界面不会把正常计算误判为卡死。记录以任务终态驱动：只有成功生成、波形有效且在生成完成后经一次 ASR 回读、文本保真度达标的 WAV 进入历史。转写文稿以 `segments: [{ start, end, text, speaker, emotion }]` 结构保存，SRT 只是导出展示格式；声音角色由 VoiceCloneEngine 生成：预处理参考音、选出 3~6 秒连续语音、归一化、验收波形和 CosyVoice 声纹，再以一次“合成->ASR 回读”校准，只有带完整验收记录的角色能进入 TTS。未选择角色时，CosyVoice 合成固定使用 CosyVoice 仓库随附的 `zero_shot_prompt.wav` 及其官方对应文本，VoxCPM2 使用 Voice Design 默认音，VoxCPM1.5/0.5B 必须选择角色；选择角色时才使用角色的短样本和对应转写。`python/audio_runner.py` 负责状态、下载、转写、策略和验收，`python/tts_runner.py` 在官方锁定的独立 TTS venv 中加载 CosyVoice，`python/voxcpm_runner.py` 在 `-voxcpm` venv 中加载 VoxCPM，`python/whisper_shim.py` 只在该 worker 的加载期注入兼容边界。
+### 声音角色是可复用的音色资产
 
-## 开发
+从一段人声素材自动截取 3–6 秒连续人声、验证波形与声纹，回读校准通过后才生成角色。未通过验收的输入不会创建角色。
+
+### 双引擎配音，按需选择
+
+默认 **CosyVoice2**（官方默认声音或声纹克隆），可选 **VoxCPM**（VoxCPM2 约 5.0GB / VoxCPM1.5 约 2.0GB / VoxCPM-0.5B 约 1.6GB）：VoxCPM2 支持 30 语种与 Voice Design 默认音，VoxCPM1.5/0.5B 需提供角色参考音。
+
+### 与剪辑器字幕工作流打通
+
+转写保存为平台 `transcript` 素材（源声音 + SRT + JSON bundle），剪辑器经能力桥（`audio.transcribe` / `audio.save`）一键生成字幕轨并绑定可编辑文稿。
+
+## 从想法到成片
+
+1. **准备环境**：首次打开自动准备依赖；或按需下载模型（Hugging Face / ModelScope / 自动回退）。
+2. **转写**：选择素材库中的音频或视频、模型与语言，生成文稿与 SRT，满意后保存为 transcript 素材。
+3. **创建声音角色**：选择一段人声素材命名并创建，系统自动预处理与验收。
+4. **配音**：输入文本，选择引擎与角色（可选），试听私有预览后保存为音频素材。
+5. **回到剪辑器**：在时间线上使用字幕与配音素材继续编排与导出。
+
+## 核心能力
+
+| 能力 | 你能做什么 | 关键操作 |
+| --- | --- | --- |
+| **本地转写** | 音/视频转带时间戳文稿与 SRT，支持中/英/自动 | `audio.transcribe` · `audio.transcript` · `audio.transcripts` |
+| **声音角色** | 从参考音创建可复用角色，自动验收声纹与回读 | `audio.character.create` · `audio.characters` · `audio.character.remove` |
+| **配音合成** | 用默认声音或角色朗读新文本，支持 CosyVoice2 / VoxCPM 三档 | `audio.synthesize` · `audio.syntheses` |
+| **保存入库** | 将私有文稿/配音/角色参考音保存为素材库 Asset | `audio.save` |
+| **环境与模型** | 检查 Python/FFmpeg/模型与引擎就绪状态，按需安装 | `audio.status` · `audio.prepare` · `audio.install` |
+| **任务中心** | 统一查看、检索与取消所有任务，查看持久化日志 | `audio.tasks.list` · `audio.task.get` · `audio.task.logs` · `audio.task.cancel` |
+
+> 完整操作契约见 `manifest.json` 的 `operations` 列表；跨 App 复用标有 `capability: true` 的操作。
+
+## 快速开始
+
+### 在 Recut 中打开
+
+1. 安装并启动 Recut（见主仓库 [README](../../README.md#安装-recut)）。
+2. 在 **Apps** 中安装 **声音工坊** 并打开。
+3. 首次进入按提示完成环境准备与模型下载（`audio.status` 可查看进度）。
+
+### 让 Agent 帮你做
+
+在 Claude Code / OpenCode / Codex Cli 中对项目说：
+
+> “用声音工坊处理这个请求【把这段视频转写成中文字幕，保存后在剪辑器里生成字幕轨】。先读 audio.status 确认模型就绪，再调用 audio.transcribe，完成后保存并在剪辑器中落轨。”
+
+Agent 会经能力桥调用转写与保存，结果回到素材库与时间线。
+
+## 界面导览
+
+- **模型管理**：选择并下载 Whisper / Qwen3-ASR / CosyVoice2 / VoxCPM 权重，切换下载源。
+- **转写**：选择素材与语言，查看分段文稿与 SRT 预览，保存为 transcript 素材。
+- **声音角色**：从素材库选择参考音、命名创建，查看验收结果与角色列表。
+- **配音**：输入文本、选择引擎与角色，试听并保存。
+- **任务与日志**：查看当前与历史任务状态，打开持久化日志，取消运行中任务。
+
+![声音工坊界面](./assets/audio-studio.jpg)
+<sub>转写、声音角色与配音在同一工作区协作，结果经确认后进入素材库。</sub>
+
+## 常见问题
+
+**转写或配音按钮不可用？** 先在 `audio.status` 中检查 Python、FFmpeg 与模型是否就绪，未就绪时按引导执行 `audio.prepare` / `audio.install`。
+
+**声音角色创建失败？** 参考音需包含清晰、连续的人声片段；系统会验证波形与声纹，未通过验收的输入不会创建角色，建议更换更干净的人声素材重试。
+
+**VoxCPM 模型很大，下载失败怎么办？** 可在模型管理中切换 Hugging Face / ModelScope / 自动回退来源；VoxCPM 首次使用会先安装独立 venv，日志可在任务中心查看。
+
+**保存后在哪里找到结果？** 转写保存为 `transcript` 素材（bundle 含源声音、SRT 与 JSON），配音保存为音频素材，均可在全局素材库与剪辑器素材面板中使用。
+
+## 面向开发者
+
+声音工坊是独立 Recut App。UI 源码在 `ui/`（React + TypeScript + Vite），后台按 `manifest.json` 的 `background` 与 `operations` 契约运行。
 
 ```sh
 make app-link APP=apps/audio-studio
@@ -56,19 +111,8 @@ npm install
 npm run build
 ```
 
-构建后的 `ui/dist/` 是 `manifest.json` 的运行时入口。模型下载、Python 依赖安装和实际推理由服务进程触发，不应在 UI 打包流程中执行。
+- 运行时消费 `ui/dist/index.html`，`ui/dist/` 与 `node_modules/` 不入库。
+- 模型权重保存到 `~/.recut/models/audio-studio/`；venv 位于 `~/.recut/python/envs/recut.audio-studio/`。
+- 架构与契约：`manifest.json` · `background.js` · `bootstrap.py` · `python/` · `skills/`。
 
-## 目录结构
-
-```text
-AGENTS.md               Agent 执行边界与生成/保存规则
-background.js           App SQLite、素材复制、Python 调用与显式导入素材库的 operation
-bootstrap.py            固定 CosyVoice/Matcha-TTS 源码提交、创建 CosyVoice 与 VoxCPM 专属 venv、安装锁文件并验证依赖闭包
-manifest.json           独立 App 身份、权限和 operation 契约
-python/                 平台 venv 的 lockfile、模型下载和转写/角色/合成 launcher
-rfc/                    设计决策：如双引擎配音（IndexTTS-2.5）方案与 VoxCPM 多版本方案
-skills/                 App skill：约束 Agent 只能使用公开 operation 契约
-ui/                     React/Vite 运行环境、模型管理、转写、角色、配音（含 VoxCPM 引擎/版本选择）与预览工作台
-```
-
-[PROTOCOL]: 变更时更新此头部，然后检查 README.md
+[返回主 README](../../README.md) · [应用地图](../../README.md#应用地图)
