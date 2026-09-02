@@ -48,14 +48,20 @@
       "name": "audio.status",
       "surfaces": ["api", "mcp"],
       "capability": true,
-      "description": "检查声音工坊的本地 Python、FFmpeg、Whisper/Qwen3-ASR 模型与 CosyVoice/VoxCPM 运行环境（engines）和已下载模型；activeJob 返回当前异步任务状态供轮询。",
+      "description": "检查声音工坊的本地 Python、FFmpeg、Whisper/Qwen3-ASR 模型与 CosyVoice/VoxCPM 运行环境（engines）和已下载模型；activeJob 返回最新在途任务，tasks 返回全部在途（queued/running）任务清单供功能级状态轮询（也会驱动后端队列推进）。",
       "inputSchema": { "type": "object", "properties": {} }
     },
     {
       "name": "audio.prepare",
       "surfaces": ["api", "mcp"],
-      "description": "自动安装声音工坊的 Python 运行依赖和 CosyVoice 官方代码，并尽力准备 VoxCPM 专属运行环境，不下载模型权重。异步提交，立即返回 job；用平台 recut.job.status / recut.job.wait 轮询终态。",
-      "inputSchema": { "type": "object", "properties": {} }
+      "description": "自动安装声音工坊的 Python 运行依赖和 CosyVoice 官方代码，并尽力准备 VoxCPM 专属运行环境，不下载模型权重。target 定向准备运行环境：all=全量（缺省，含主 venv 与双引擎环境）、cosyvoice=只准备 CosyVoice 官方代码与专属 venv、voxcpm=只准备 VoxCPM 专属 venv。异步提交返回 taskId；环境准备是单槽串行（等推理任务排空后自动开始），空槽时 job 立即返回，占槽时 job=null（已排队，用 audio.status.tasks 观察）。",
+      "inputSchema": { "type": "object", "properties": { "target": { "type": "string", "enum": ["all", "cosyvoice", "voxcpm"], "description": "可选；缺省 all。定向修复某个专属运行环境时传 cosyvoice 或 voxcpm。" } } }
+    },
+    {
+      "name": "audio.settings.set",
+      "surfaces": ["api"],
+      "description": "持久化声音工坊的下载源设置（automatic/huggingface/modelscope），供右上角「模型与环境」设置面板变更即保存；audio.install 调用时也会同步写入。只读返回当前生效值。",
+      "inputSchema": { "type": "object", "properties": { "downloadSource": { "type": "string", "enum": ["automatic", "huggingface", "modelscope"] } } }
     },
     {
       "name": "audio.install",
@@ -67,7 +73,7 @@
       "name": "audio.transcribe",
       "surfaces": ["api", "mcp"],
       "capability": true,
-      "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，默认不会保存到素材库。异步提交，立即返回 job 与 transcript.id；用平台 recut.job.status / recut.job.wait 轮询，完成后用 audio.transcript(id) 读取分段与 SRT。saveToLibrary:true 时终态自动导入全局素材库为 transcript 素材（幂等去重），一次调用即完成转写+入库。",
+      "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，默认不会保存到素材库。推理任务单槽 FIFO 排队：空槽立即派发（job 非空），占槽时 job=null（已排队，槽位释放后自动开始，用 audio.status.tasks / audio.tasks.list 观察）；同模型权重仍在下载时也保持排队。完成后用 audio.transcript(id) 读取分段与 SRT。saveToLibrary:true 时终态自动导入全局素材库为 transcript 素材（幂等去重），一次调用即完成转写+入库。",
       "inputSchema": { "type": "object", "required": ["assetId", "kind", "model", "language"], "properties": { "assetId": { "type": "string" }, "kind": { "type": "string", "enum": ["audio", "video"] }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] }, "language": { "type": "string", "enum": ["auto", "zh", "en"] }, "saveToLibrary": { "type": "boolean", "description": "可选；默认 false=私有产物不自动入库；true=终态后自动导入为平台 transcript 素材并返回 transcriptAssetId。" } } }
     },
     {
@@ -105,7 +111,7 @@
     {
       "name": "audio.character.design",
       "surfaces": ["api", "mcp"],
-      "description": "用 VoxCPM2 Voice Design 音色描述或一个声音预设创建声音角色：presetId 分支零推理（解析预设参考音缓存/下载后直接落为角色）；designDesc 分支由 VoxCPM2 生成探针并经 Qwen3-ASR 回读验收（≥0.85）后建角色。产物是 origin=design/preset 的普通角色，用 audio.character.complete 读取、audio.save(id, kind:character) 入库。异步提交，立即返回 job；用平台 recut.job.status / recut.job.wait 轮询终态。",
+      "description": "用 VoxCPM2 Voice Design 音色描述或一个声音预设创建声音角色：presetId 分支零推理（解析预设参考音缓存/下载后直接落为角色）；designDesc 分支由 VoxCPM2 生成探针并经 Qwen3-ASR 回读验收（≥0.85）后建角色。产物是 origin=design/preset 的普通角色，用 audio.character.complete 读取、audio.save(id, kind:character) 入库。推理任务单槽排队：占槽时 job=null（已排队，槽位释放后自动开始）。",
       "inputSchema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "description": "角色名，必填。" }, "designDesc": { "type": "string", "maxLength": 120, "description": "中文音色描述（年龄/性别 + 音色质地 + 语速节奏 + 参照场景，不写真实人名）；与 presetId 二选一。" }, "presetId": { "type": "string", "description": "声音预设 id（见 audio.presets）；与 designDesc 二选一。" }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"], "description": "可选；回读验收 ASR 模型，缺省 qwen3-asr-0.6b。" }, "saveToLibrary": { "type": "boolean", "description": "可选；true 时终态后自动把参考音导入素材库并返回 assetId（World voice_reference 链路依赖）。" } } }
     },
     {
@@ -168,7 +174,7 @@
       "name": "audio.cancel",
       "surfaces": ["api", "mcp"],
       "capability": true,
-      "description": "停止当前正在运行的声音工坊本地任务，并保留终态日志。",
+      "description": "停止最新在途的声音工坊本地任务（运行中经 shell job 取消，排队中直接落 cancelled），并保留终态日志。",
       "inputSchema": { "type": "object", "properties": {} }
     },
     {
@@ -196,7 +202,7 @@
       "name": "audio.task.cancel",
       "surfaces": ["api", "mcp"],
       "capability": true,
-      "description": "按任务中心 id 停止正在运行的任务（经底层 shell job 取消）。",
+      "description": "按任务中心 id 取消任务：运行中经底层 shell job 取消，排队中（尚未派发）直接落 cancelled 终态。",
       "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } }
     }
   ]

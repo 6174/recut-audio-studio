@@ -4,13 +4,12 @@
  * [POS]: audio-studio Phase 2 的预设选择与 Voice Design UI；预设名称/blurb 来自 op 返回值，需先折叠为当前 locale 字符串
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Check, Pause, Play, Wand2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { useRecutLocale, type Locale } from "./recut-sdk";
@@ -26,6 +25,12 @@ function localizedText(locale: Locale, value: LocalizedText): string {
   if (!value || typeof value !== "object") return "";
   const primary = locale === "en" ? value.en : value.zh;
   return primary || value.zh || value.en || "";
+}
+
+export function originLabelKey(origin: string): I18nKey {
+  if (origin === "design") return "character.origin.design";
+  if (origin === "preset") return "character.origin.preset";
+  return "character.origin.clone";
 }
 
 export function VoicePicker({ busy, presets, presetsError, characters, showDefaultVoice, defaultVoiceLabelKey, selectedPresetId, selectedCharacterId, playingPresetId, preparingPresetId, onSelectPreset, onSelectCharacter, onPreviewPreset }: {
@@ -70,7 +75,7 @@ export function VoicePicker({ busy, presets, presetsError, characters, showDefau
       </div>
     </> : <div className="grid max-h-64 gap-1.5 overflow-auto pr-1">
       {showDefaultVoice && <button aria-pressed={!selectedCharacterId && !selectedPresetId} className={cn("flex items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", !selectedCharacterId && !selectedPresetId ? "border-primary bg-primary/10" : "hover:bg-muted/70")} disabled={busy !== null} onClick={() => onSelectCharacter("")} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{t(locale, defaultVoiceLabelKey)}</strong></span>{!selectedCharacterId && !selectedPresetId && <Check className="size-3.5 shrink-0 text-primary" />}</button>}
-      {characters.map((character) => <button aria-pressed={selectedCharacterId === character.id} className={cn("flex items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", selectedCharacterId === character.id ? "border-primary bg-primary/10" : "hover:bg-muted/70")} disabled={busy !== null} key={character.id} onClick={() => onSelectCharacter(character.id)} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{character.name}</strong></span>{selectedCharacterId === character.id && <Check className="size-3.5 shrink-0 text-primary" />}</button>)}
+      {characters.map((character) => <button aria-pressed={selectedCharacterId === character.id} className={cn("flex items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", selectedCharacterId === character.id ? "border-primary bg-primary/10" : "hover:bg-muted/70")} disabled={busy !== null} key={character.id} onClick={() => onSelectCharacter(character.id)} type="button"><span className="grid min-w-0 gap-0.5"><span className="flex min-w-0 items-center gap-1.5"><strong className="truncate font-medium">{character.name}</strong><small className="shrink-0 text-[10px] text-muted-foreground">{t(locale, originLabelKey(character.origin))}</small></span></span>{selectedCharacterId === character.id && <Check className="size-3.5 shrink-0 text-primary" />}</button>)}
     </div>}
   </div>;
 }
@@ -91,59 +96,75 @@ function PresetCard({ preset, selected, busy, playing, preparing, onPlay, onSele
   </div>;
 }
 
-export function DesignVoiceDialog({ open, onClose, presets, busy, onSubmit }: { open: boolean; onClose: () => void; presets: VoicePreset[]; busy: string | null; onSubmit: (input: { name: string; designDesc?: string; presetId?: string; saveToLibrary: boolean }) => void }) {
+// 无遮罩设计面板：由角色二级模态框承载。
+// 就绪门控按表单形态计算：从预设起步分支零推理（只需 ASR 回读模型）；自由描述分支需要 VoxCPM2。
+export function DesignVoicePanel({ busy, onClose, presets, asrReady, voxcpm2Ready, onOpenSettings, onSubmit }: { busy: string | null; onClose: () => void; presets: VoicePreset[]; asrReady: boolean; voxcpm2Ready: boolean; onOpenSettings: () => void; onSubmit: (input: { name: string; designDesc?: string; presetId?: string; saveToLibrary: boolean }) => void }) {
   const locale = useRecutLocale();
   const [name, setName] = useState("");
   const [designDesc, setDesignDesc] = useState("");
   const [fromPreset, setFromPreset] = useState("");
   const [saveToLibrary, setSaveToLibrary] = useState(true);
-  useEffect(() => { if (open) { setName(""); setDesignDesc(""); setFromPreset(""); setSaveToLibrary(true); } }, [open]);
-  if (!open) return null;
+  const ready = asrReady && (Boolean(fromPreset) || voxcpm2Ready);
+  const missingHint = !asrReady ? t(locale, "design.missingAsr") : !voxcpm2Ready ? t(locale, "design.missingVoxcpm2") : "";
   const submit = () => {
     if (!name.trim()) return;
     if (!designDesc.trim() && !fromPreset) return;
     onSubmit({ name: name.trim(), designDesc: fromPreset ? undefined : designDesc.trim() || undefined, presetId: fromPreset || undefined, saveToLibrary });
   };
-  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-[2px]" onClick={onClose}>
-    <div className="flex max-h-[min(720px,calc(100dvh-32px))] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-border/80 bg-card shadow-2xl" onClick={(event) => event.stopPropagation()}>
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/70 px-5 py-4">
-        <h2 className="flex items-center gap-2 text-sm font-semibold"><Wand2 className="size-4 text-primary" />{t(locale, "design.title")}</h2>
-        <Button aria-label="close" onClick={onClose} type="button" variant="ghost" size="icon"><span className="text-sm">✕</span></Button>
+  return <div className="grid gap-4">
+    <div className="grid gap-2">
+      <Label className="text-xs text-muted-foreground" htmlFor="design-name">{t(locale, "character.name.label")}</Label>
+      <Input id="design-name" disabled={busy !== null} onChange={(event) => setName(event.target.value)} placeholder={t(locale, "design.name.placeholder")} value={name} />
+    </div>
+    <div className="grid gap-2">
+      <Label className="text-xs text-muted-foreground" htmlFor="design-desc">{t(locale, "design.desc.label")}</Label>
+      <Textarea id="design-desc" disabled={busy !== null} maxLength={120} onChange={(event) => { setFromPreset(""); setDesignDesc(event.target.value); }} placeholder={t(locale, "design.desc.placeholder")} rows={4} value={designDesc} />
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] leading-relaxed text-muted-foreground">{t(locale, "design.desc.hint")}</p>
+        <span className={cn("shrink-0 font-mono text-[10px]", designDesc.length >= 120 ? "text-destructive" : "text-muted-foreground")}>{tF(locale, "design.charCount", { count: designDesc.length })}</span>
       </div>
-      <div className="min-h-0 overflow-y-auto p-5">
-        <div className="grid gap-4">
-        <div className="grid gap-2">
-          <Label className="text-xs text-muted-foreground" htmlFor="design-name">{t(locale, "character.name.label")}</Label>
-          <Input id="design-name" onChange={(event) => setName(event.target.value)} placeholder={t(locale, "design.name.placeholder")} value={name} />
-        </div>
-        <div className="grid gap-2">
-          <Label className="text-xs text-muted-foreground" htmlFor="design-desc">{t(locale, "design.desc.label")}</Label>
-          <Textarea id="design-desc" maxLength={120} onChange={(event) => { setFromPreset(""); setDesignDesc(event.target.value); }} placeholder={t(locale, "design.desc.placeholder")} rows={4} value={designDesc} />
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-[11px] leading-relaxed text-muted-foreground">{t(locale, "design.desc.hint")}</p>
-            <span className={cn("shrink-0 font-mono text-[10px]", designDesc.length >= 120 ? "text-destructive" : "text-muted-foreground")}>{tF(locale, "design.charCount", { count: designDesc.length })}</span>
-          </div>
-        </div>
-        <div className="grid gap-2">
-          <Label className="text-xs text-muted-foreground" htmlFor="design-from-preset">{t(locale, "design.fromPreset")}</Label>
-          <Select onValueChange={(value) => { setFromPreset(value === "__none" ? "" : value); const preset = presets.find((item) => item.id === value); if (preset?.designDesc) setDesignDesc(preset.designDesc); }} value={fromPreset || "__none"}>
-            <SelectTrigger id="design-from-preset" className="h-9 w-full min-w-0"><SelectValue placeholder={t(locale, "design.fromPreset.placeholder")} /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__none">{t(locale, "design.fromPreset.placeholder")}</SelectItem>
-              {presets.map((preset) => <SelectItem key={preset.id} value={preset.id}>{localizedText(locale, preset.name)}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </div>
-        <label className="flex w-fit cursor-pointer items-center gap-2 text-xs">
-          <input checked={saveToLibrary} className="size-3.5 accent-[var(--primary,currentColor)]" onChange={(event) => setSaveToLibrary(event.target.checked)} type="checkbox" />
-          {t(locale, "design.saveToLibrary")}
-        </label>
-        <div className="flex items-center justify-end gap-2 border-t pt-4">
-          <Button disabled={busy !== null} onClick={onClose} type="button" variant="ghost">{t(locale, "dialog.close")}</Button>
-          <Button disabled={busy !== null || !name.trim() || (!designDesc.trim() && !fromPreset)} onClick={submit} title={!designDesc.trim() && !fromPreset ? t(locale, "design.descRequired") : undefined} type="button">{busy === "character" ? <span className="size-4 animate-spin rounded-full border-2 border-current border-t-transparent" /> : <Wand2 className="size-4" />}{t(locale, "design.submit")}</Button>
-        </div>
-        </div>
+    </div>
+    <div className="grid gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-xs text-muted-foreground">{t(locale, "design.fromPreset")}</Label>
+        {fromPreset ? <Button className="h-6 px-2 text-[11px]" disabled={busy !== null} onClick={() => setFromPreset("")} type="button" variant="ghost">{t(locale, "design.fromPreset.clear")}</Button> : null}
       </div>
+      <div className="grid max-h-52 grid-cols-2 gap-2 overflow-auto rounded-lg border border-border/60 p-2">
+        {presets.map((preset) => {
+          const selected = fromPreset === preset.id;
+          return (
+            <button
+              key={preset.id}
+              aria-pressed={selected}
+              className={cn("grid gap-1 rounded-xl border px-2.5 py-2.5 text-left text-xs transition-colors", selected ? "border-primary bg-primary/10" : "border-border/60 bg-card/50 hover:bg-muted/50")}
+              disabled={busy !== null}
+              onClick={() => {
+                const next = selected ? "" : preset.id;
+                setFromPreset(next);
+                if (next && preset.designDesc) setDesignDesc(preset.designDesc);
+              }}
+              type="button"
+            >
+              <span className="flex items-center justify-between gap-1">
+                <strong className="truncate text-[12px] font-medium">{localizedText(locale, preset.name)}</strong>
+                {selected ? <Check className="size-3.5 shrink-0 text-primary" /> : null}
+              </span>
+              <small className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">{localizedText(locale, preset.blurb)}</small>
+            </button>
+          );
+        })}
+        {!presets.length ? <p className="col-span-2 py-6 text-center text-xs text-muted-foreground">{t(locale, "preset.empty")}</p> : null}
+      </div>
+      {fromPreset ? <p className="text-[11px] text-primary">{tF(locale, "design.fromPreset.selected", { name: localizedText(locale, presets.find((p) => p.id === fromPreset)?.name ?? fromPreset) })}</p> : <p className="text-[11px] text-muted-foreground">{t(locale, "design.fromPreset.hint")}</p>}
+    </div>
+    <label className="flex w-fit cursor-pointer items-center gap-2 text-xs">
+      <input checked={saveToLibrary} className="size-3.5 accent-[var(--primary,currentColor)]" disabled={busy !== null} onChange={(event) => setSaveToLibrary(event.target.checked)} type="checkbox" />
+      {t(locale, "design.saveToLibrary")}
+    </label>
+    {ready ? null : <div className="grid gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs"><strong className="text-amber-600">{missingHint}</strong><Button disabled={busy !== null} onClick={onOpenSettings} type="button" variant="outline" size="sm" className="w-fit">{t(locale, "settings.open")}</Button></div>}
+    <div className="flex items-center justify-end gap-2 border-t pt-4">
+      <Button disabled={busy !== null} onClick={onClose} type="button" variant="ghost">{t(locale, "dialog.close")}</Button>
+      <Button disabled={busy !== null || !ready || !name.trim() || (!designDesc.trim() && !fromPreset)} onClick={submit} title={!ready && missingHint ? missingHint : !designDesc.trim() && !fromPreset ? t(locale, "design.descRequired") : undefined} type="button">{busy === "character" || busy === "design" ? <span className="size-4 animate-spin rounded-full border-2 border-current border-t-transparent" /> : <Wand2 className="size-4" />}{t(locale, "design.submit")}</Button>
     </div>
   </div>;
 }

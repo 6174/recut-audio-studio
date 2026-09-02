@@ -48,9 +48,9 @@ Transcripts are saved as platform `transcript` Assets (source audio + SRT + JSON
 
 ## From Idea to Finished Video
 
-1. **Prepare the environment**: auto-setup on first open, or download models on demand (Hugging Face / ModelScope / automatic fallback).
+1. **Prepare the environment**: auto-setup on first open; afterwards model downloads and runtime installs are done on demand from the “Models & Environment” settings panel (top-right gear).
 2. **Transcribe**: pick an audio or video Asset, model and language, generate transcript and SRT, then save as a transcript Asset.
-3. **Create a voice character**: pick a clean voice clip, name it and create — preprocessing and verification run automatically; or pick one of the 20 built-in presets, or design a voice from a description (`audio.character.design`).
+3. **Create a voice character**: three entry points — upload a reference clip to clone, design a voice with VoxCPM2 Voice Design, or manage existing characters (preview / save / remove). You can also pick one of the 20 built-in presets, or design a voice from a description (`audio.character.design`).
 4. **Synthesize**: enter text, choose engine and character (optional), preview privately and save as an audio Asset.
 5. **Back to the Editor**: use subtitles and dubbing Assets on the timeline and export.
 
@@ -65,7 +65,7 @@ Transcripts are saved as platform `transcript` Assets (source audio + SRT + JSON
 | **Speech synthesis** | Read new text with the default voice or a character (CosyVoice2 / VoxCPM) | `audio.synthesize` · `audio.syntheses` |
 | **Save to library** | Save private transcripts/syntheses/character references as Assets | `audio.save` |
 | **Environment & models** | Check Python/FFmpeg/models/engines and install on demand | `audio.status` · `audio.prepare` · `audio.install` |
-| **Task center** | List, inspect and cancel tasks; read persistent logs | `audio.tasks.list` · `audio.task.get` · `audio.task.logs` · `audio.task.cancel` |
+| **Task center** | List, inspect and cancel all tasks (including queued); read persistent logs; inference tasks queue serially, downloads run in parallel | `audio.tasks.list` · `audio.task.get` · `audio.task.logs` · `audio.task.cancel` |
 
 > See `manifest.json` `operations` for the full contract; operations marked `capability: true` are reusable across Apps.
 
@@ -87,9 +87,9 @@ The Agent calls transcription and save via the capability bridge; results return
 
 ## Interface Tour
 
-- **Model management**: download Whisper / Qwen3-ASR / CosyVoice2 / VoxCPM weights; switch source.
+- **Models & Environment settings (top-right gear)**: centrally manage the three runtimes (main / CosyVoice / VoxCPM dedicated venvs), all models (Whisper / Qwen3-ASR / CosyVoice2 / three VoxCPM tiers), download source and voice-preset cache state. Workflow steps keep only readiness status plus an “Open settings” shortcut.
 - **Transcribe**: pick media and language, review segments and SRT, save as transcript Asset.
-- **Voice characters**: pick a reference clip, name and create, or choose a built-in preset in the "Presets" tab, or create from a description in the "Design voice" dialog; review verification and character list.
+- **Voice characters**: the first-level modal offers three entry points — upload a reference clip to clone, design a voice with VoxCPM, or manage existing characters (preview / save / remove, with origin badges).
 - **Synthesize**: enter text, choose engine and character, preview and save.
 - **Tasks & logs**: view current and past tasks, open persistent logs, cancel running jobs.
 
@@ -98,11 +98,13 @@ The Agent calls transcription and save via the capability bridge; results return
 
 ## FAQ
 
-**Transcribe or synthesize is disabled?** Check `audio.status` for Python, FFmpeg and model readiness; follow the prompt to run `audio.prepare` / `audio.install`.
+**Why can't I run multiple tasks at once?** Inference tasks (transcribe / create character / design voice / synthesize) all load large models on the same GPU, so they are serialized on a single slot. Submitting several at once never fails — later ones enter “Queued” and start automatically when the earlier one finishes (no need to resubmit). Model downloads (`audio.install`) don't contend with inference and can always run in parallel. Launcher cards and the task center label each feature's “running / queued” state.
+
+**Transcribe or synthesize is disabled?** It may already have a queued/running task (one per feature), or a dependency isn't ready — open the “Models & Environment” settings panel (top-right gear) to see what isn't ready and install it per row; or check `audio.status` for Python, FFmpeg and model state. To repair one dedicated venv, use `audio.prepare { target: "cosyvoice" | "voxcpm" }`.
 
 **Voice character creation failed?** The reference needs a clear, continuous speech segment. The system validates waveform and voiceprint — unverified inputs are rejected. Try a cleaner voice clip.
 
-**VoxCPM models are large and downloads fail?** Switch between Hugging Face / ModelScope / automatic fallback in model management. VoxCPM installs a dedicated venv on first use; logs are in the task center.
+**VoxCPM models are large and downloads fail?** In the “Models & Environment” settings panel, switch between Hugging Face / ModelScope / automatic fallback and re-download. VoxCPM installs a dedicated venv on first use; logs are in the task center.
 
 **Where are saved results?** Transcripts become `transcript` Assets (bundle with source audio, SRT and JSON); syntheses become audio Assets — both available in the global media library and the Editor's media panel.
 

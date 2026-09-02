@@ -1,12 +1,12 @@
 /**
- * [INPUT]: 依赖 Recut SDK、声音工坊 operation、平台素材选择器、素材库上传 HTTP、shadcn/ui 组件与 React 状态
- * [OUTPUT]: 对外提供三步声音工作流导航、会话级配音草稿、Download Source、Whisper/Qwen/CosyVoice 模型下载、转写文稿与 SRT、转写保存为素材库 bundle、声音角色创建/试听/删除、预设声音选择（选中即后台经 audio.preset.prepare 按 CDN 下载缓存，试听就绪后直接播放）与配音合成与试听，以及任务中心的状态筛选、停止、日志和显式入库工作台
- * [POS]: audio-studio UI 编排层；入口卡片负责启动工作流，左侧任务中心负责选择与筛选，右侧详情负责日志和结果；仅在环境和选定模型就绪后开放推理，生成结果先留在 App 私有文件区；UI 用户可见文案经 i18n.ts 随 locale 切换
+ * [INPUT]: 依赖 Recut SDK、声音工坊 operation（含 audio.prepare target 定向环境准备、audio.settings.set 下载源、audio.status.tasks 在途任务清单）、平台素材选择器、素材库上传 HTTP、shadcn/ui 组件与 React 状态
+ * [OUTPUT]: 对外提供三步声音工作流导航、右上角「模型与环境」设置面板（运行环境 / ASR / TTS 模型 / 下载源 / 声音预设状态集中管理）、会话级配音草稿、转写文稿与 SRT、声音角色三入口（上传参考音 / VoxCPM 设计 / 管理）+ 二级模态框、预设声音选择（选中即后台经 audio.preset.prepare 按 CDN 下载缓存，试听就绪后直接播放）与配音合成与试听，以及任务中心的状态筛选（含排队中）、停止、日志和显式入库工作台；任务并发模型（rfc/2026-09-03-task-queue-and-parallelism.md）：进行中状态按功能归属（status.tasks 派生），推理任务可跨功能同时发起（后端单槽排队）
+ * [POS]: audio-studio UI 编排层；入口卡片负责启动工作流并显示该功能的排队/进行中标记，左侧任务中心负责选择与筛选，右侧详情负责日志和结果；模型下载与环境安装动作集中在设置面板（按行禁用），步骤内只留就绪引导；仅在环境和选定模型就绪后开放推理，生成结果先留在 App 私有文件区；UI 用户可见文案经 i18n.ts 随 locale 切换
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 import { createRoot } from "react-dom/client";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowRight, AudioWaveform, Check, ChevronRight, CircleStop, Clock3, Copy, Download, FileAudio, Filter, FolderOpen, LoaderCircle, MessageSquareText, Mic, Save, Send, Sparkles, Trash2, Upload, Wand2, X } from "lucide-react";
+import { ArrowRight, AudioWaveform, Check, ChevronLeft, ChevronRight, CircleStop, Clock3, Copy, Download, FileAudio, Filter, FolderOpen, LoaderCircle, MessageSquareText, Mic, Save, Send, Settings, Sparkles, Trash2, Upload, Users, Wand2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,7 +19,7 @@ import { recut, useRecutLocale, type Locale } from "./recut-sdk";
 import type { TaskAction, TaskListResult, TaskLogEntry, TaskLogResult, TaskState, TaskSummary } from "./types";
 import { t, tF, type I18nKey } from "./i18n";
 import type { ActiveAudioJob, DesignCharacterResult, DownloadSource, Language, MediaAsset, PresetsResult, RuntimeStatus, ShellJob, ShellJobLog, SpeechModel, Synthesis, TranscriptDetail, TranscriptSegment, TranscriptSummary, TtsEngine, VoiceCharacter, VoicePreset, VoiceStyle, VoxCpmEngineStatus, VoxCpmVersion } from "./types";
-import { DesignVoiceDialog, VoicePicker } from "./voice";
+import { DesignVoicePanel, originLabelKey, VoicePicker } from "./voice";
 import "./index.css";
 
 type Tab = "transcribe" | "characters" | "synthesize";
@@ -93,6 +93,7 @@ function saveSynthesisDraft(draft: SynthesisDraft) {
 }
 
 function isTerminal(status: ShellJob["status"]) { return status !== "queued" && status !== "running"; }
+const TERMINAL_TASK_STATES = new Set<TaskState>(["completed", "failed", "cancelled", "interrupted"]);
 function isValidActiveJob(job: ActiveAudioJob | null | undefined): job is ActiveAudioJob { return Boolean(job?.id && ["prepare", "install", "transcribe", "character", "design", "synthesize"].includes(job.action) && ["queued", "running", "completed", "failed", "cancelled", "interrupted"].includes(job.status)); }
 function logText(logs: ShellJobLog[]) { return logs.map((entry) => entry.text).join(""); }
 function mergeLogs(current: ShellJobLog[], next: ShellJobLog[]) { return [...new Map([...current, ...next].map((entry) => [entry.sequence, entry])).values()].sort((left, right) => left.sequence - right.sequence).slice(-80); }
@@ -134,11 +135,10 @@ function App() {
   const [playingPresetId, setPlayingPresetId] = useState("");
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const preparedPresetURLs = useRef(new Map<string, string>());
-  const [designOpen, setDesignOpen] = useState(false);
   const [style, setStyle] = useState<VoiceStyle>(initialSynthesisDraft.style);
   const [engine, setEngine] = useState<EngineFamily>(initialSynthesisDraft.engine);
   const [voxcpmVersion, setVoxcpmVersion] = useState<VoxCpmVersion>(initialSynthesisDraft.voxcpmVersion);
-  const [busy, setBusy] = useState<"prepare" | "install" | "transcribe" | "character" | "synthesize" | "save" | "upload" | "agent" | null>(null);
+  const [busy, setBusy] = useState<"prepare" | "install" | "transcribe" | "character" | "design" | "synthesize" | "save" | "upload" | "agent" | null>(null);
   const [message, setMessage] = useState(() => t(locale, "msg.starting"));
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
   const [logs, setLogs] = useState<ShellJobLog[]>([]);
@@ -148,20 +148,41 @@ function App() {
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskSummary | null>(null);
   const [taskLogs, setTaskLogs] = useState<TaskLogEntry[]>([]);
-  const [taskFilter, setTaskFilter] = useState<"all" | "running" | "completed" | "failed">("all");
+  const [taskFilter, setTaskFilter] = useState<"all" | "running" | "queued" | "completed" | "failed">("all");
   const [launcherOpen, setLauncherOpen] = useState<Tab | null>(null);
   const [workflowStep, setWorkflowStep] = useState(0);
-  const [charactersView, setCharactersView] = useState<"create" | "list" | "detail">("create");
+  // 声音角色模态框：一级=三入口（上传参考音 / VoxCPM 设计 / 管理），二级=各入口表单/列表（clone 为两步克隆流程，manage 内可进详情）。
+  const [charactersView, setCharactersView] = useState<"entries" | "clone" | "design" | "manage">("entries");
   const [viewCharacter, setViewCharacter] = useState<VoiceCharacter | null>(null);
+  // 右上角「模型与环境」设置面板：集中管理运行环境与模型下载；focus 控制打开后滚动到对应分区。
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsFocus, setSettingsFocus] = useState<"environment" | "asr" | "tts">("environment");
   const [taskResult, setTaskResult] = useState<{ kind: "transcript" | "character" | "synthesis"; item: TranscriptDetail | VoiceCharacter | Synthesis } | null>(null);
   const finalizingJob = useRef<string | null>(null);
   const logsRef = useRef<ShellJobLog[]>([]);
   const showLogsForNewJob = useCallback(() => {}, []);
+  // 任务队列（RFC task-queue）：audio.status.tasks 的在途清单（queued/running）——功能级「进行中/排队中」状态的唯一真相源。
+  const [activeTasks, setActiveTasks] = useState<TaskSummary[]>([]);
+  const activeTasksRef = useRef<TaskSummary[]>([]);
+  const notifiedTasks = useRef(new Set<string>());
 
-  const loadTasks = useCallback(async (filter: "all" | "running" | "completed" | "failed") => {
+  // 功能级 busy 聚合：running 优先于 queued；控件按功能禁用（跨功能不再互锁）。
+  const featureState = useCallback((actions: TaskAction[]): "running" | "queued" | null => {
+    const list = activeTasks.filter((task) => actions.includes(task.action) && !TERMINAL_TASK_STATES.has(task.state));
+    return list.some((task) => task.state === "running") ? "running" : list.length ? "queued" : null;
+  }, [activeTasks]);
+  // 控件 busy（动作名或 null）：该功能有在途（含排队）任务 → 动作名（禁用+转圈）；
+  // 否则本地操作 busy（upload/save/agent）按发起它的那个功能归属映射。
+  const featureBusy = (actions: TaskAction[], localActions: string[]): ActiveJob["action"] | null => {
+    if (featureState(actions) !== null) return actions[0];
+    if (busy && localActions.includes(busy)) return actions[0];
+    return null;
+  };
+
+  const loadTasks = useCallback(async (filter: "all" | "running" | "queued" | "completed" | "failed") => {
     try {
       const result = await recut.background.call("audio.tasks.list", {
-        ...(filter === "running" ? { status: "running" } : filter === "completed" ? { status: "done" } : filter === "failed" ? { status: "failed" } : {}),
+        ...(filter === "running" ? { status: "running" } : filter === "queued" ? { status: "queued" } : filter === "completed" ? { status: "done" } : filter === "failed" ? { status: "failed" } : {}),
         limit: 100,
       }) as TaskListResult;
       setTasks(result.tasks);
@@ -194,12 +215,41 @@ function App() {
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.stopFailed")); }
   };
 
+  // 离队（终态）任务的通告：按 action 弹消息 + 角色/设计成功后切「管理」视图；notifiedTasks 去重防重复 toast。
+  const announceTaskEnd = useCallback((task: TaskSummary) => {
+    if (task.state === "completed") {
+      switch (task.action) {
+        case "transcribe": setMessage(t(locale, "msg.transcribeDone")); break;
+        case "character": setMessage(t(locale, "msg.characterCreated")); setCharactersView("manage"); setViewCharacter(null); break;
+        case "design": setMessage(t(locale, "msg.designDone")); setCharactersView("manage"); setViewCharacter(null); break;
+        case "synthesize": setMessage(t(locale, "msg.synthesisDone")); break;
+        case "prepare": setMessage(t(locale, "msg.envReady")); break;
+        default: setMessage(t(locale, "msg.modelInstalled"));
+      }
+    } else {
+      const error = task.error || t(locale, task.state === "cancelled" ? "msg.taskCancelled" : "msg.taskFailed");
+      setFailure(error); setMessage(error);
+    }
+    void loadTasks(taskFilter);
+  }, [locale, loadTasks, taskFilter]);
+
   const refresh = useCallback(async (): Promise<RuntimeStatus | null> => {
     try {
       const nextStatus = await recut.state.query("audio.status") as RuntimeStatus;
       setStatus(nextStatus);
       if (nextStatus.downloadSource) setDownloadSource(nextStatus.downloadSource);
-      setMessage(nextStatus.activeJob && isValidActiveJob(nextStatus.activeJob) ? t(locale, "msg.jobRunning") : nextStatus.ready ? t(locale, "msg.ready") : nextStatus.setupError ? tF(locale, "msg.setupFailed", { error: nextStatus.setupError }) : t(locale, "msg.starting"));
+      // 任务队列同步（RFC task-queue）：刷新在途清单，diff 通告终态任务（功能级状态随之更新）。
+      const nextTasks = nextStatus.tasks ?? [];
+      for (const prev of activeTasksRef.current) {
+        if (nextTasks.some((task) => task.id === prev.id)) continue;
+        if (notifiedTasks.current.has(prev.id)) continue;
+        notifiedTasks.current.add(prev.id);
+        announceTaskEnd(prev);
+      }
+      activeTasksRef.current = nextTasks;
+      setActiveTasks(nextTasks);
+      const hasRunning = nextTasks.some((task) => task.state === "running");
+      setMessage(nextStatus.activeJob && isValidActiveJob(nextStatus.activeJob) ? t(locale, "msg.jobRunning") : nextTasks.length ? t(locale, hasRunning ? "msg.jobRunning" : "msg.queuedRunning") : nextStatus.ready ? t(locale, "msg.ready") : nextStatus.setupError ? tF(locale, "msg.setupFailed", { error: nextStatus.setupError }) : t(locale, "msg.starting"));
       try {
         const [nextCharacters, nextSyntheses] = await Promise.all([
           recut.state.query("audio.characters") as Promise<VoiceCharacter[]>,
@@ -210,7 +260,7 @@ function App() {
       return nextStatus;
     } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.readStatusFailed")); }
     return null;
-  }, [locale]);
+  }, [locale, announceTaskEnd]);
 
   const loadAssets = useCallback(async (): Promise<MediaAsset[]> => {
     const response = await fetch("/v1/media/assets");
@@ -230,7 +280,8 @@ function App() {
 
   const syncJob = useCallback(async () => {
     const job = await recut.state.query("audio.job") as ActiveAudioJob | null;
-    if (isValidActiveJob(job)) restoreJob(job);
+    if (job && job.id && isValidActiveJob(job)) restoreJob(job);
+    else if (job && job.status === "queued") { /* 排队中（未派发、无 shell job）：保持当前进度显示不动 */ }
     else { setActiveJob(null); setBusy(null); }
   }, [restoreJob]);
 
@@ -302,6 +353,12 @@ function App() {
     const timer = window.setInterval(() => { void syncJob().catch((error) => setMessage(error instanceof Error ? error.message : t(locale, "msg.syncJobFailed"))); }, 1000);
     return () => window.clearInterval(timer);
   }, [activeJob, syncJob, locale]);
+  // 存在在途任务（含排队）时 1.5s 轮询 status：驱动后端队列推进 + 功能级状态 + 终态通告。
+  useEffect(() => {
+    if (activeTasks.length === 0) return;
+    const timer = window.setInterval(() => { void refresh(); }, 1500);
+    return () => window.clearInterval(timer);
+  }, [activeTasks.length, refresh]);
   useEffect(() => recut.events.subscribe((raw) => {
     const event = raw as { type?: string; log?: ShellJobLog; job?: ShellJob };
     if (event.type === "shell.job.log" && event.log?.jobId === activeJob?.id) setLogs((items) => mergeLogs(items, [event.log as ShellJobLog]));
@@ -343,6 +400,8 @@ function App() {
       } else if ((job.action === "character" || job.action === "design") && job.recordID) {
         await recut.background.call("audio.character.complete", { id: job.recordID });
         setMessage(t(locale, job.action === "design" ? "msg.designDone" : "msg.characterCreated"));
+        // 角色创建/设计成功后自动切到「管理」视图，新角色立即可见。
+        setCharactersView("manage"); setViewCharacter(null);
       } else if (job.action === "synthesize" && job.recordID) {
         await recut.background.call("audio.synthesis.complete", { id: job.recordID });
         setMessage(t(locale, "msg.synthesisDone"));
@@ -373,19 +432,29 @@ function App() {
   const effectiveEngine: TtsEngine = engine === "cosyvoice2" ? "cosyvoice2" : voxcpmVersion;
   const engineReady = engine === "cosyvoice2" ? ttsReady : Boolean(voxcpmModel?.ready);
   const engineNeedsCharacter = engine === "voxcpm" && voxcpmVersion !== "voxcpm2";
-  const running = busy === "prepare" || busy === "install" || busy === "transcribe" || busy === "character" || busy === "synthesize";
+  // VoxCPM2 完整就绪（运行时 + 权重）；设计声音入口的徽标还需叠加 ASR 回读模型就绪。
+  const voxcpm2Ready = Boolean(voxcpmEngine?.models["voxcpm2"]?.ready);
+  const designReady = voxcpm2Ready && readySpeechModel;
+  // 入口卡按功能归属的徽标状态（RFC task-queue）：running→进行中、queued→排队中；本地操作 busy 只影响发起它的那个功能。
+  const launcherStates: Record<Tab, "running" | "queued" | null> = {
+    transcribe: featureState(["transcribe"]) ?? (busy && ["transcribe", "upload", "save", "agent"].includes(busy) ? "running" : null),
+    characters: featureState(["character", "design"]) ?? (busy && ["character", "design", "upload", "agent"].includes(busy) ? "running" : null),
+    synthesize: featureState(["synthesize"]) ?? (busy && ["synthesize", "save", "agent"].includes(busy) ? "running" : null),
+  };
 
-  const beginJob = (job: ShellJob, action: ActiveJob["action"], recordID?: string) => {
+  const beginJob = (job: ShellJob | null | undefined, action: ActiveJob["action"], recordID?: string) => {
+    // job=null 表示已排队（后端单槽被占）：不建立进度视图，仅刷新任务列表（排队徽标由 activeTasks 驱动）。
+    if (!job) { void loadTasks(taskFilter); return; }
     setElapsedSeconds(0);
     setActiveJob({ id: job.id, action, recordID, startedAt: jobStartedAt(job.startedAt), status: job.status, error: job.error });
     void loadTasks(taskFilter);
     void syncJob().catch((error) => setMessage(error instanceof Error ? error.message : t(locale, "msg.jobLogFailed")));
   };
 
-  const installSpeechModel = async () => {
+  const installSpeechModel = async (selected: SpeechModel = model) => {
     setBusy("install"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage(tF(locale, "msg.downloadingModel", { name: speechModels.find((item) => item.id === model)?.label ?? model }));
-    try { const result = await recut.background.call("audio.install", { model, source: downloadSource }) as { job: ShellJob; taskId: string }; beginJob(result.job, "install"); focusNewTask(result.taskId, "install", "", { type: "ASR 模型", model }); }
+    setMessage(tF(locale, "msg.downloadingModel", { name: speechModels.find((item) => item.id === selected)?.label ?? selected }));
+    try { const result = await recut.background.call("audio.install", { model: selected, source: downloadSource }) as { job: ShellJob; taskId: string }; beginJob(result.job, "install"); focusNewTask(result.taskId, "install", "", { type: "ASR 模型", model: selected }); }
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.installFailed")); setBusy(null); }
   };
 
@@ -406,23 +475,42 @@ function App() {
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.installFailed")); setBusy(null); }
   };
 
-  const retryVoxCpmRuntime = async () => {
+  // 定向环境准备（设置面板）：all=全量 / cosyvoice / voxcpm；主 venv 缺失时只能走 Setup 的全量路径。
+  const prepareTarget = async (target: "all" | "cosyvoice" | "voxcpm") => {
     setBusy("prepare"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage(t(locale, "msg.voxcpmRuntimeInstalling"));
-    try { const result = await recut.background.call("audio.prepare") as { job: ShellJob; taskId: string }; beginJob(result.job, "prepare"); focusNewTask(result.taskId, "prepare", "", { type: "运行环境" }); }
+    setMessage(target === "all" ? t(locale, "msg.starting") : tF(locale, "msg.preparingRuntime", { name: target === "voxcpm" ? "VoxCPM" : "CosyVoice" }));
+    try { const result = await recut.background.call("audio.prepare", { target }) as { job: ShellJob | null; taskId: string }; beginJob(result.job, "prepare"); focusNewTask(result.taskId, "prepare", "", { type: "运行环境", target }, result.job ? "running" : "queued"); if (!result.job) setMessage(t(locale, "msg.jobQueued")); }
     catch (error) { const message = error instanceof Error ? error.message : t(locale, "msg.startFailed"); setFailure(message); setMessage(message); setBusy(null); }
   };
 
-  const prepare = useCallback(async () => {
-    setBusy("prepare"); setFailure(""); showLogsForNewJob(); setLogs([]);
-    setMessage(t(locale, "msg.starting"));
-    try { const result = await recut.background.call("audio.prepare") as { job: ShellJob }; beginJob(result.job, "prepare"); }
-    catch (error) { const message = error instanceof Error ? error.message : t(locale, "msg.startFailed"); setFailure(message); setMessage(message); setBusy(null); }
-  }, [locale]);
+  const prepare = useCallback(async () => { await prepareTarget("all"); }, [locale]);
 
-  const focusNewTask = useCallback((taskId: string, action: TaskAction, recordId: string, meta: TaskSummary["meta"]) => {
+  const openSettings = useCallback((focus: "environment" | "asr" | "tts") => {
+    setSettingsFocus(focus);
+    setSettingsOpen(true);
+  }, []);
+
+  const changeDownloadSource = async (source: DownloadSource) => {
+    try {
+      const result = await recut.background.call("audio.settings.set", { downloadSource: source }) as { downloadSource: DownloadSource };
+      setDownloadSource(result.downloadSource);
+    } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.settingsFailed")); }
+  };
+
+  const removeCharacter = async (character: VoiceCharacter) => {
+    try {
+      await recut.background.call("audio.character.remove", { id: character.id });
+      setCharacters((items) => items.filter((item) => item.id !== character.id));
+      setViewCharacter(null);
+      setCharactersView("manage");
+      setMessage(t(locale, "msg.characterRemoved"));
+      void refresh();
+    } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.removeFailed")); }
+  };
+
+  const focusNewTask = useCallback((taskId: string, action: TaskAction, recordId: string, meta: TaskSummary["meta"], state: TaskState = "running") => {
     setLauncherOpen(null);
-    const placeholder: TaskSummary = { id: taskId, action, name: "", recordId, source: "manual", submittedBy: "", state: "running", progress: 0, createdAt: new Date().toISOString(), meta };
+    const placeholder: TaskSummary = { id: taskId, action, name: "", recordId, source: "manual", submittedBy: "", state, progress: 0, createdAt: new Date().toISOString(), meta };
     setSelectedTask(placeholder);
     void selectTask(placeholder, characters, syntheses);
   }, [characters, syntheses, selectTask]);
@@ -431,7 +519,7 @@ function App() {
     if (!assetId) return setMessage(t(locale, "msg.pickSourceFirst"));
     setBusy("transcribe"); setFailure(""); showLogsForNewJob(); setLogs([]);
     setMessage(sourceKind === "video" ? t(locale, "msg.extractingVideo") : t(locale, "msg.transcribing"));
-    try { const result = await recut.background.call("audio.transcribe", { assetId, kind: sourceKind, model, language }) as { job: ShellJob; taskId: string; transcript: { id: string } }; beginJob(result.job, "transcribe", result.transcript.id); focusNewTask(result.taskId, "transcribe", result.transcript.id, { type: "转写", model, language, sourceAssetId: assetId, sourceKind }); }
+    try { const result = await recut.background.call("audio.transcribe", { assetId, kind: sourceKind, model, language }) as { job: ShellJob | null; taskId: string; transcript: { id: string } }; beginJob(result.job, "transcribe", result.transcript.id); focusNewTask(result.taskId, "transcribe", result.transcript.id, { type: "转写", model, language, sourceAssetId: assetId, sourceKind }, result.job ? "running" : "queued"); if (!result.job) setMessage(t(locale, "msg.jobQueued")); }
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.transcribeFailed")); setBusy(null); }
   };
 
@@ -440,7 +528,7 @@ function App() {
     if (!characterName.trim()) return setMessage(t(locale, "msg.nameCharacter"));
     setBusy("character"); setFailure(""); showLogsForNewJob(); setLogs([]);
     setMessage(t(locale, "msg.creatingCharacter"));
-    try { const result = await recut.background.call("audio.character.create", { assetId: characterAssetId, name: characterName.trim(), model }) as { job: ShellJob; taskId: string; character: { id: string } }; beginJob(result.job, "character", result.character.id); focusNewTask(result.taskId, "character", result.character.id, { type: "声音角色", model, characterName: characterName.trim(), sourceAssetId: characterAssetId }); }
+    try { const result = await recut.background.call("audio.character.create", { assetId: characterAssetId, name: characterName.trim(), model }) as { job: ShellJob | null; taskId: string; character: { id: string } }; beginJob(result.job, "character", result.character.id); focusNewTask(result.taskId, "character", result.character.id, { type: "声音角色", model, characterName: characterName.trim(), sourceAssetId: characterAssetId }, result.job ? "running" : "queued"); if (!result.job) setMessage(t(locale, "msg.jobQueued")); }
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.characterFailed")); setBusy(null); }
   };
 
@@ -450,8 +538,8 @@ function App() {
     try {
       const result = await recut.background.call("audio.character.design", { name: input.name, ...(input.designDesc ? { designDesc: input.designDesc } : {}), ...(input.presetId ? { presetId: input.presetId } : {}), saveToLibrary: input.saveToLibrary, model }) as DesignCharacterResult;
       beginJob(result.job, "design", result.character.id);
-      focusNewTask(result.taskId, "design", result.character.id, { type: "设计声音", model, characterName: input.name, ...(input.presetId ? { presetId: input.presetId } : {}), ...(input.designDesc ? { designDesc: input.designDesc.slice(0, 60) } : {}) });
-      setDesignOpen(false);
+      focusNewTask(result.taskId, "design", result.character.id, { type: "设计声音", model, characterName: input.name, ...(input.presetId ? { presetId: input.presetId } : {}), ...(input.designDesc ? { designDesc: input.designDesc.slice(0, 60) } : {}) }, result.job ? "running" : "queued");
+      if (!result.job) setMessage(t(locale, "msg.jobQueued"));
     } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.designFailed")); setBusy(null); }
   };
 
@@ -462,7 +550,7 @@ function App() {
     setBusy("synthesize"); setFailure(""); showLogsForNewJob(); setLogs([]);
     setMessage(t(locale, "msg.synthesizing"));
     // presetId 与 characterId 互斥：选中预设时只提交 presetId（未缓存的由后端在提交时自动 resolve 下载）。
-    try { const result = await recut.background.call("audio.synthesize", { ...(synthesisPresetId ? { presetId: synthesisPresetId } : synthesisCharacterId ? { characterId: synthesisCharacterId } : {}), text: synthesisText, style, engine: effectiveEngine }) as { job: ShellJob; taskId: string; synthesis: { id: string } }; beginJob(result.job, "synthesize", result.synthesis.id); focusNewTask(result.taskId, "synthesize", result.synthesis.id, { type: "配音合成", engine: effectiveEngine, characterId: synthesisCharacterId, ...(synthesisPresetId ? { presetId: synthesisPresetId } : {}) }); }
+    try { const result = await recut.background.call("audio.synthesize", { ...(synthesisPresetId ? { presetId: synthesisPresetId } : synthesisCharacterId ? { characterId: synthesisCharacterId } : {}), text: synthesisText, style, engine: effectiveEngine }) as { job: ShellJob | null; taskId: string; synthesis: { id: string } }; beginJob(result.job, "synthesize", result.synthesis.id); focusNewTask(result.taskId, "synthesize", result.synthesis.id, { type: "配音合成", engine: effectiveEngine, characterId: synthesisCharacterId, ...(synthesisPresetId ? { presetId: synthesisPresetId } : {}) }, result.job ? "running" : "queued"); if (!result.job) setMessage(t(locale, "msg.jobQueued")); }
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.synthesisFailed")); setBusy(null); }
   };
 
@@ -544,11 +632,14 @@ function App() {
   if (!status?.ready) return <Setup autoPrepare={status !== null} busy={busy} elapsedSeconds={elapsedSeconds} failure={status?.setupError || failure || (!status?.pending ? status?.error || "" : "")} failureLogs={status?.setupLogs ?? []} logs={logs} message={message} pythonVersion={status?.pythonVersion} onPrepare={() => void prepare()} onAskAgent={() => void askAgent()} />;
 
   const nav = { step: workflowStep, onBack: () => setWorkflowStep((current) => Math.max(0, current - 1)), onNext: () => setWorkflowStep((current) => current + 1) };
+  const openSettingsFor = (focus: "environment" | "asr" | "tts") => openSettings(focus);
+  // 克隆流程不再放进主 controls：它只服务于角色二级模态框。
+  const characterCloneControls = <div className="flex flex-col"><CharacterControls {...nav} busy={featureBusy(["character"], ["character", "upload", "save", "agent"])} characterAsset={characterAsset} characterName={characterName} model={model} readySpeechModel={readySpeechModel} setCharacterName={setCharacterName} setModel={setModel} upload={(file) => void upload(file, "character")} onChoose={() => void chooseCharacterSource()} onRun={() => void createCharacter()} onOpenSettings={openSettingsFor} /></div>;
   const controls = <div className="flex flex-col gap-6">
-    {tab === "transcribe" && <TranscribeControls {...nav} busy={busy} downloadSource={downloadSource} language={language} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setLanguage={setLanguage} setModel={setModel} sourceAsset={sourceAsset} upload={(file) => void upload(file, "source")} onChoose={() => void chooseSource(["audio", "video"])} onRun={() => void transcribeSource()} onInstall={() => void installSpeechModel()} />}
-    {tab === "characters" && <CharacterControls {...nav} busy={busy} characterAsset={characterAsset} characterName={characterName} downloadSource={downloadSource} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setCharacterName={setCharacterName} setModel={setModel} upload={(file) => void upload(file, "character")} onChoose={() => void chooseCharacterSource()} onRun={() => void createCharacter()} onInstall={() => void installSpeechModel()} onDesignVoice={() => setDesignOpen(true)} />}
-    {tab === "synthesize" && <SynthesizeControls {...nav} busy={busy} characters={characters} playingPresetId={playingPresetId} preparingPresetId={preparingPresetId} presets={presets} presetsError={presetsError} downloadSource={downloadSource} engine={engine} engineNeedsCharacter={engineNeedsCharacter} engineReady={engineReady} setDownloadSource={setDownloadSource} setEngine={setEngine} setSynthesisCharacterId={setSynthesisCharacterId} setSynthesisPresetId={setSynthesisPresetId} setSynthesisText={setSynthesisText} setStyle={setStyle} setVoxcpmVersion={setVoxcpmVersion} style={style} synthesisCharacterId={synthesisCharacterId} synthesisPresetId={synthesisPresetId} synthesisText={synthesisText} voxcpmEngine={voxcpmEngine} voxcpmVersion={voxcpmVersion} onInstall={() => void installCosyVoice()} onInstallVoxCpm={(version) => void installVoxCpm(version)} onRetryVoxCpmRuntime={() => void retryVoxCpmRuntime()} onPreparePreset={(presetId, announce) => void preparePreset(presetId, announce)} onRun={() => void synthesizeVoice()} />}
+    {tab === "transcribe" && <TranscribeControls {...nav} busy={featureBusy(["transcribe"], ["transcribe", "upload", "save", "agent"])} language={language} model={model} readySpeechModel={readySpeechModel} setLanguage={setLanguage} setModel={setModel} sourceAsset={sourceAsset} upload={(file) => void upload(file, "source")} onChoose={() => void chooseSource(["audio", "video"])} onRun={() => void transcribeSource()} onOpenSettings={openSettingsFor} />}
+    {tab === "synthesize" && <SynthesizeControls {...nav} busy={featureBusy(["synthesize"], ["synthesize", "save", "agent"])} characters={characters} playingPresetId={playingPresetId} preparingPresetId={preparingPresetId} presets={presets} presetsError={presetsError} engine={engine} engineNeedsCharacter={engineNeedsCharacter} engineReady={engineReady} setEngine={setEngine} setSynthesisCharacterId={setSynthesisCharacterId} setSynthesisPresetId={setSynthesisPresetId} setSynthesisText={setSynthesisText} setStyle={setStyle} setVoxcpmVersion={setVoxcpmVersion} style={style} synthesisCharacterId={synthesisCharacterId} synthesisPresetId={synthesisPresetId} synthesisText={synthesisText} voxcpmEngine={voxcpmEngine} voxcpmVersion={voxcpmVersion} onPreparePreset={(presetId, announce) => void preparePreset(presetId, announce)} onOpenSettings={openSettingsFor} onRun={() => void synthesizeVoice()} />}
   </div>;
+  const closeCharacters = () => { setLauncherOpen(null); setCharactersView("entries"); setViewCharacter(null); };
 
   return <div className="mx-auto flex h-dvh w-full max-w-[1440px] flex-col overflow-hidden bg-background p-4 sm:p-6">
     <header className="flex shrink-0 items-center justify-between gap-4 px-1 py-1 sm:py-2">
@@ -559,30 +650,45 @@ function App() {
           <p className="max-w-2xl truncate text-xs text-muted-foreground">{t(locale, "app.subtitle")}</p>
         </div>
       </div>
+      <Button aria-label={t(locale, "settings.button")} disabled={busy === "agent"} onClick={() => openSettings("environment")} size="icon" type="button" variant="outline"><Settings className="size-4" /></Button>
     </header>
-    <LauncherBar active={tab} onLaunch={(next) => { setTab(next); setLauncherOpen(next); setWorkflowStep(0); if (next === "characters") { setCharactersView("create"); setViewCharacter(null); } }} running={running} />
+    <LauncherBar active={tab} onLaunch={(next) => { setTab(next); setLauncherOpen(next); setWorkflowStep(0); if (next === "characters") { setCharactersView("entries"); setViewCharacter(null); } }} states={launcherStates} />
     <main className="mt-4 grid min-h-0 flex-1 items-stretch gap-4 min-[900px]:grid-cols-[minmax(340px,420px)_minmax(0,1fr)]">
       <TaskCenter tasks={tasks} filter={taskFilter} selectedTask={selectedTask} onCancelTask={(id) => void cancelTaskById(id)} onFilter={setTaskFilter} onSelect={(task) => { void selectTask(task, characters, syntheses); }} />
-      <TaskDetail busy={busy} logs={taskLogs} selectedTask={selectedTask} result={taskResult} onEditSegment={updateSegmentText} onSaveCharacter={(character) => void saveCharacter(character)} onSaveSynthesis={(synthesis) => void saveSynthesis(synthesis)} onSaveTranscript={(transcript) => void saveTranscript(transcript)} />
+      <TaskDetail busy={busy === "save" || busy === "agent" ? busy : null} logs={taskLogs} selectedTask={selectedTask} result={taskResult} onEditSegment={updateSegmentText} onSaveCharacter={(character) => void saveCharacter(character)} onSaveSynthesis={(synthesis) => void saveSynthesis(synthesis)} onSaveTranscript={(transcript) => void saveTranscript(transcript)} />
     </main>
     {launcherOpen === "characters" ? (
-      <DialogCard title={t(locale, "nav.characters.label")} onClose={() => setLauncherOpen(null)} headerAction={charactersView === "create" ? <Button onClick={() => { setCharactersView("list"); setViewCharacter(null); }} size="sm" type="button" variant="outline">{tF(locale, "characters.all", { count: characters.length })}</Button> : <Button onClick={() => { setCharactersView("create"); setViewCharacter(null); }} size="sm" type="button" variant="outline">{t(locale, "characters.new")}</Button>}>
-        {charactersView === "create" ? <div className="flex flex-col">{controls}</div>
-          : charactersView === "detail" && viewCharacter ? <div className="grid gap-3"><Button className="w-fit" onClick={() => { setCharactersView("list"); setViewCharacter(null); }} size="sm" type="button" variant="ghost">{t(locale, "characters.back")}</Button><CharacterPreview busy={busy} character={viewCharacter} onSave={() => void saveCharacter(viewCharacter)} /></div>
-          : <CharList characters={characters} onOpen={(character) => { setViewCharacter(character); setCharactersView("detail"); }} />}
+      <DialogCard headerAction={<Badge className="shrink-0 text-[11px]" variant="outline">{tF(locale, "characters.all", { count: characters.length })}</Badge>} onClose={closeCharacters} title={t(locale, "nav.characters.label")}>
+        <CharacterEntries characters={characters} designReady={designReady} onPick={(entry) => { setCharactersView(entry); setViewCharacter(null); }} />
       </DialogCard>
     ) : launcherOpen ? (
       <DialogCard title={t(locale, launcherOpen === "transcribe" ? "nav.transcribe.label" : "nav.synthesize.label")} onClose={() => setLauncherOpen(null)}>{controls}</DialogCard>
     ) : null}
-    <DesignVoiceDialog busy={busy} onClose={() => setDesignOpen(false)} onSubmit={(input) => void designCharacter(input)} open={designOpen} presets={presets} />
+    {launcherOpen === "characters" && charactersView !== "entries" ? (
+      <DialogCard level="top" onBack={() => { setCharactersView("entries"); setViewCharacter(null); }} title={charactersView === "clone" ? t(locale, "characters.entry.clone.title") : charactersView === "design" ? t(locale, "characters.entry.design.title") : t(locale, "characters.entry.manage.title")} onClose={closeCharacters}>
+        {charactersView === "clone" ? characterCloneControls
+          : charactersView === "design" ? <DesignVoicePanel asrReady={readySpeechModel} busy={featureBusy(["design"], ["design", "agent"])} onClose={closeCharacters} onOpenSettings={() => openSettings("tts")} onSubmit={(input) => void designCharacter(input)} presets={presets} voxcpm2Ready={voxcpm2Ready} />
+          : viewCharacter ? <div className="grid gap-3"><Button className="w-fit" onClick={() => setViewCharacter(null)} size="sm" type="button" variant="ghost">{t(locale, "characters.backEntries")}</Button><CharacterPreview busy={featureBusy(["character"], ["save"])} character={viewCharacter} onRemove={() => void removeCharacter(viewCharacter)} onSave={() => void saveCharacter(viewCharacter)} /></div>
+          : <CharList characters={characters} onOpen={(character) => setViewCharacter(character)} />}
+      </DialogCard>
+    ) : null}
+    {settingsOpen ? (
+      <DialogCard level="top" title={t(locale, "settings.title")} onClose={() => setSettingsOpen(false)}>
+        <SettingsDialog activeTasks={activeTasks} downloadSource={downloadSource} focus={settingsFocus} onInstallAsr={(selected) => void installSpeechModel(selected)} onInstallCosyVoice={() => void installCosyVoice()} onInstallVoxCpm={(version) => void installVoxCpm(version)} onPrepareTarget={(target) => void prepareTarget(target)} onSetDownloadSource={(source) => void changeDownloadSource(source)} presets={presets} status={status} />
+      </DialogCard>
+    ) : null}
   </div>;
 }
 
-function DialogCard({ title, onClose, children, headerAction }: { title: string; onClose: () => void; children: ReactNode; headerAction?: ReactNode }) {
-  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-[2px]" onClick={onClose}>
+function DialogCard({ title, onClose, children, headerAction, level = "base", onBack }: { title: string; onClose: () => void; children: ReactNode; headerAction?: ReactNode; level?: "base" | "top"; onBack?: () => void }) {
+  const locale = useRecutLocale();
+  return <div className={cn("fixed inset-0 grid place-items-center bg-black/60 p-4 backdrop-blur-[2px]", level === "top" ? "z-[60]" : "z-50")} onClick={onClose}>
     <div className="flex max-h-[min(760px,calc(100dvh-32px))] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border/70 bg-card shadow-2xl" onClick={(event) => event.stopPropagation()}>
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/70 px-5 py-4">
-        <h2 className="text-sm font-semibold">{title}</h2>
+        <div className="flex min-w-0 items-center gap-1.5">
+          {onBack && <Button aria-label={t(locale, "characters.backEntries")} onClick={onBack} type="button" variant="ghost" size="icon"><ChevronLeft className="size-4" /></Button>}
+          <h2 className="truncate text-sm font-semibold">{title}</h2>
+        </div>
         <div className="flex items-center gap-2">{headerAction}<Button aria-label="close" onClick={onClose} type="button" variant="ghost" size="icon"><X className="size-4" /></Button></div>
       </div>
       <div className="min-h-0 overflow-y-auto p-5">{children}</div>
@@ -593,11 +699,109 @@ function DialogCard({ title, onClose, children, headerAction }: { title: string;
 function CharList({ characters, onOpen }: { characters: VoiceCharacter[]; onOpen: (character: VoiceCharacter) => void }) {
   const locale = useRecutLocale();
   return <div className="grid gap-3 min-[560px]:grid-cols-2">
-    {characters.length ? characters.map((character) => <button className="group grid gap-2 rounded-lg border bg-card p-3 text-left transition-colors hover:border-ring hover:bg-muted" key={character.id} onClick={() => onOpen(character)} type="button"><span className="flex items-center justify-between gap-2"><span className="min-w-0 truncate text-sm font-semibold">{character.name}</span>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</span><span className="text-[11px] text-muted-foreground">{character.model.replace("whisper-", "")} · {timestamp(locale, character.createdAt)}</span></button>) : <p className="col-span-full py-8 text-center text-sm text-muted-foreground">{t(locale, "characters.empty")}</p>}
+    {characters.length ? characters.map((character) => <button className="group grid gap-2 rounded-lg border bg-card p-3 text-left transition-colors hover:border-ring hover:bg-muted" key={character.id} onClick={() => onOpen(character)} type="button"><span className="flex items-center justify-between gap-2"><span className="min-w-0 truncate text-sm font-semibold">{character.name}</span>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</span><span className="text-[11px] text-muted-foreground">{t(locale, originLabelKey(character.origin))} · {character.model.replace("whisper-", "")} · {timestamp(locale, character.createdAt)}</span></button>) : <p className="col-span-full py-8 text-center text-sm text-muted-foreground">{t(locale, "characters.empty")}</p>}
   </div>;
 }
 
-function LauncherBar({ active, onLaunch, running }: { active: Tab; onLaunch: (tab: Tab) => void; running: boolean }) {
+// 声音角色一级模态框：三张入口卡（上传参考音 / VoxCPM 设计 / 管理），点击进入二级模态框。
+function CharacterEntries({ characters, designReady, onPick }: { characters: VoiceCharacter[]; designReady: boolean; onPick: (entry: "clone" | "design" | "manage") => void }) {
+  const locale = useRecutLocale();
+  const entries: { id: "clone" | "design" | "manage"; icon: ReactNode; title: string; desc: string; badge?: ReactNode }[] = [
+    { id: "clone", icon: <Upload className="size-4" />, title: t(locale, "characters.entry.clone.title"), desc: t(locale, "characters.entry.clone.desc") },
+    { id: "design", icon: <Wand2 className="size-4 text-primary" />, title: t(locale, "characters.entry.design.title"), desc: t(locale, "characters.entry.design.desc"), badge: designReady ? <Badge className="shrink-0 text-[10px]" variant="secondary">{t(locale, "characters.entry.design.ready")}</Badge> : <Badge className="shrink-0 text-[10px] text-amber-600" variant="outline">{t(locale, "characters.entry.design.missing")}</Badge> },
+    { id: "manage", icon: <Users className="size-4" />, title: t(locale, "characters.entry.manage.title"), desc: tF(locale, "characters.entry.manage.desc", { count: characters.length }) },
+  ];
+  return <div className="grid gap-2">
+    <p className="text-xs text-muted-foreground">{t(locale, "characters.entries.hint")}</p>
+    {entries.map((item) => <button className="group grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-xl border p-3.5 text-left transition-colors hover:border-ring hover:bg-muted/60" key={item.id} onClick={() => onPick(item.id)} type="button">
+      <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted text-foreground">{item.icon}</span>
+      <span className="grid min-w-0 gap-1"><span className="flex items-center gap-2 text-sm font-semibold leading-none">{item.title}{item.badge}</span><small className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">{item.desc}</small></span>
+      <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+    </button>)}
+  </div>;
+}
+
+// 设置面板的资源行：名称 + 状态徽标 + 错误 + 动作按钮。
+function ResourceRow({ title, meta, ready, error, actionLabel, onAction, disabled, secondary }: { title: string; meta: string; ready: boolean; error?: string | null; actionLabel: string; onAction: () => void; disabled: boolean; secondary?: boolean }) {
+  const locale = useRecutLocale();
+  return <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-lg border px-3 py-2.5">
+    <div className="grid min-w-0 gap-0.5">
+      <span className="flex items-center gap-2 text-xs font-medium">{title}<span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px]", ready ? "bg-primary/15 text-primary" : "bg-amber-500/15 text-amber-600")}>{ready ? t(locale, "settings.env.ready") : t(locale, "settings.env.missing")}</span></span>
+      <small className="truncate text-[11px] text-muted-foreground" title={meta}>{meta}</small>
+      {!ready && error && <p className="truncate text-[11px] text-destructive" title={error}>{error}</p>}
+    </div>
+    <Button disabled={disabled} onClick={onAction} size="sm" type="button" variant={secondary ? "ghost" : "outline"} className="shrink-0"><Download className="size-3.5" />{actionLabel}</Button>
+  </div>;
+}
+
+// 右上角「模型与环境」面板：运行环境（主/CosyVoice/VoxCPM）+ ASR/TTS 模型 + 下载源 + 声音预设状态。
+// 全部安装/下载动作集中于此；工作流步骤只保留就绪引导。
+function SettingsDialog({ status, activeTasks, downloadSource, presets, focus, onInstallAsr, onInstallCosyVoice, onInstallVoxCpm, onPrepareTarget, onSetDownloadSource }: { status: RuntimeStatus; activeTasks: TaskSummary[]; downloadSource: DownloadSource; presets: VoicePreset[]; focus: "environment" | "asr" | "tts"; onInstallAsr: (model: SpeechModel) => void; onInstallCosyVoice: () => void; onInstallVoxCpm: (version: VoxCpmVersion) => void; onPrepareTarget: (target: "all" | "cosyvoice" | "voxcpm") => void; onSetDownloadSource: (source: DownloadSource) => void }) {
+  const locale = useRecutLocale();
+  const environmentRef = useRef<HTMLDivElement | null>(null);
+  const asrRef = useRef<HTMLDivElement | null>(null);
+  const ttsRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const target = focus === "asr" ? asrRef.current : focus === "tts" ? ttsRef.current : environmentRef.current;
+    target?.scrollIntoView({ block: "start" });
+  }, [focus]);
+  const localeNote = (key: I18nKey) => t(locale, key);
+  const engines = status.tts?.engines;
+  const installed = new Set(status.asr?.installed ?? []);
+  // 按行禁用（RFC task-queue）：每行只被自己的在途任务禁用（该 target 的 prepare / 该模型的 install），互不锁。
+  const isActive = (task: TaskSummary) => !TERMINAL_TASK_STATES.has(task.state);
+  const prepareBusy = (targets: string[]) => activeTasks.find((task) => task.action === "prepare" && isActive(task) && targets.includes(String(task.meta.target || "all")));
+  const installBusy = (model: string) => activeTasks.find((task) => task.action === "install" && isActive(task) && task.meta.model === model);
+  const busyLabel = (state: TaskState) => t(locale, state === "running" ? "settings.busy" : "task.state.queued");
+  const envMain = prepareBusy(["all"]);
+  const envCosy = prepareBusy(["cosyvoice", "all"]);
+  const envVox = prepareBusy(["voxcpm", "all"]);
+  const headerBusy = envMain ?? envCosy ?? envVox ?? activeTasks.find((task) => task.action === "install" && isActive(task));
+  const downloadLocked = activeTasks.some((task) => task.action === "install" && isActive(task) && task.state === "running");
+  const cosyvoice2 = engines?.cosyvoice2;
+  const cosyvoiceEnv = engines?.cosyvoice2?.runtime ?? false;
+  const voxcpmEngine = engines?.voxcpm ?? null;
+  const pythonVersion = status.pythonVersion ? `Python ${status.pythonVersion}` : "";
+  return <div className="grid gap-5">
+    {headerBusy && <p className="flex items-center gap-1.5 text-xs font-medium text-sky-500"><LoaderCircle className={cn("size-3.5", headerBusy.state === "running" && "animate-spin")} />{t(locale, "settings.busy")}</p>}
+    <div ref={environmentRef} className="scroll-mt-2"><ControlSection eyebrow={t(locale, "settings.eyebrow.environment")} title={t(locale, "settings.environment.title")}>
+      <div className="grid gap-2">
+        <ResourceRow title={t(locale, "settings.env.main")} meta={`${pythonVersion ? pythonVersion + " · " : ""}${t(locale, "settings.env.main.note")}`} ready actionLabel={envMain ? busyLabel(envMain.state) : t(locale, "settings.env.reinstall")} disabled={Boolean(envMain)} onAction={() => onPrepareTarget("all")} secondary />
+        <ResourceRow title={t(locale, "settings.env.cosyvoice")} meta={t(locale, "settings.env.cosyvoice.note")} ready={cosyvoiceEnv} error={cosyvoice2?.runtimeError ?? null} actionLabel={envCosy ? busyLabel(envCosy.state) : (cosyvoiceEnv ? t(locale, "settings.env.reinstall") : t(locale, "settings.env.install"))} disabled={Boolean(envCosy)} onAction={() => onPrepareTarget("cosyvoice")} secondary={cosyvoiceEnv} />
+        <ResourceRow title={t(locale, "settings.env.voxcpm")} meta={t(locale, "settings.env.voxcpm.note")} ready={Boolean(voxcpmEngine?.runtime)} error={voxcpmEngine?.runtimeError ?? null} actionLabel={envVox ? busyLabel(envVox.state) : (voxcpmEngine?.runtime ? t(locale, "settings.env.reinstall") : t(locale, "settings.env.install"))} disabled={Boolean(envVox)} onAction={() => onPrepareTarget("voxcpm")} secondary={Boolean(voxcpmEngine?.runtime)} />
+      </div>
+    </ControlSection></div>
+    <div ref={asrRef} className="scroll-mt-2"><ControlSection eyebrow={t(locale, "settings.eyebrow.asr")} title={t(locale, "settings.asr.title")}>
+      <div className="grid gap-2">
+        {speechModels.map((item) => { const row = installBusy(item.id); return <ResourceRow key={item.id} title={item.label} meta={localeNote(item.noteKey)} ready={installed.has(item.id)} actionLabel={row ? busyLabel(row.state) : t(locale, "settings.model.download")} disabled={Boolean(row)} onAction={() => onInstallAsr(item.id)} />; })}
+      </div>
+    </ControlSection></div>
+    <div ref={ttsRef} className="scroll-mt-2"><ControlSection eyebrow={t(locale, "settings.eyebrow.tts")} title={t(locale, "settings.tts.title")}>
+      <div className="grid gap-2">
+        {(() => { const row = installBusy("cosyvoice2"); return <ResourceRow title={t(locale, "engine.label.cosyvoice2")} meta={t(locale, "settings.cosyvoice.meta")} ready={Boolean(cosyvoice2?.ready)} error={cosyvoice2?.runtimeError ?? null} actionLabel={row ? busyLabel(row.state) : (cosyvoice2?.ready ? t(locale, "settings.env.reinstall") : t(locale, "settings.model.download"))} disabled={Boolean(row)} onAction={onInstallCosyVoice} secondary={Boolean(cosyvoice2?.ready)} />; })()}
+        {voxcpmVersions.map((item) => {
+          const model = voxcpmEngine?.models[item.id] ?? null;
+          const meta = `${t(locale, item.noteKey)} · ${tF(locale, "voxcpm.size", { size: (model?.sizeGb ?? 0).toFixed(1) })}`;
+          const ready = Boolean(model?.ready);
+          const row = installBusy(item.id);
+          return <ResourceRow key={item.id} title={t(locale, item.labelKey)} meta={meta} ready={ready} error={ready ? null : (voxcpmEngine?.runtime ? t(locale, "controls.voxcpm.missing") : (voxcpmEngine?.runtimeError ?? t(locale, "voxcpm.runtimeMissing")))} actionLabel={row ? busyLabel(row.state) : (ready ? t(locale, "settings.env.reinstall") : t(locale, "settings.model.download"))} disabled={Boolean(row)} onAction={() => onInstallVoxCpm(item.id)} secondary={ready} />;
+        })}
+      </div>
+    </ControlSection></div>
+    <ControlSection eyebrow="" title={t(locale, "downloadSource.label")}>
+      <DownloadSourceSelect disabled={downloadLocked} source={downloadSource} onChange={(source) => onSetDownloadSource(source)} />
+    </ControlSection>
+    <ControlSection eyebrow="" title={t(locale, "settings.presets.title")}>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Badge variant={status.presets?.cdnReachable ? "secondary" : "outline"}>{t(locale, status.presets?.cdnReachable ? "settings.presets.cdn" : "settings.presets.offline")}</Badge>
+        {presets.length > 0 && status.presets && <Badge variant="outline">{tF(locale, "settings.presets.cached", { count: status.presets.cached.length })} / {presets.length}</Badge>}
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">{t(locale, "settings.presets.hint")}</p>
+    </ControlSection>
+  </div>;
+}
+
+function LauncherBar({ active, onLaunch, states }: { active: Tab; onLaunch: (tab: Tab) => void; states: Record<Tab, "running" | "queued" | null> }) {
   const locale = useRecutLocale();
   const cards: { id: Tab; icon: ReactNode; title: string; subtitle: string; desc: string }[] = [
     { id: "transcribe", icon: <MessageSquareText className="size-5" />, title: t(locale, "nav.transcribe.label"), subtitle: "音视频 → 文稿与字幕", desc: "支持多种格式转写，智能说话人分离" },
@@ -607,10 +811,11 @@ function LauncherBar({ active, onLaunch, running }: { active: Tab; onLaunch: (ta
   return <div className="mt-2 grid shrink-0 grid-cols-1 gap-3 min-[640px]:grid-cols-3">
     {cards.map((item) => {
       const selected = active === item.id;
+      const state = states[item.id];
       return <button aria-pressed={selected} className={cn("group flex min-h-28 items-center gap-3 rounded-2xl border p-3 text-left shadow-none transition-colors", selected ? "border-primary/60 bg-primary/10" : "border-border/70 bg-card hover:border-border hover:bg-card")} key={item.id} onClick={() => onLaunch(item.id)} type="button">
         <span className={cn("grid size-12 shrink-0 place-items-center rounded-xl", selected ? "bg-primary text-primary-foreground shadow-[0_8px_24px_rgba(34,197,94,0.16)]" : "bg-muted text-foreground")}>{item.icon}</span>
         <span className="grid min-w-0 flex-1 gap-1">
-          <span className="flex items-center gap-2 text-sm font-semibold leading-none">{item.title}{selected && running && <span className="flex items-center gap-1 text-[10px] font-normal text-primary"><LoaderCircle className="size-3 animate-spin" />{t(locale, "task.state.running")}</span>}</span>
+          <span className="flex items-center gap-2 text-sm font-semibold leading-none">{item.title}{state && <span className={cn("flex items-center gap-1 text-[10px] font-normal", state === "running" ? "text-primary" : "text-amber-600")}><LoaderCircle className={cn("size-3", state === "running" && "animate-spin")} />{t(locale, state === "running" ? "task.state.running" : "task.state.queued")}</span>}</span>
           <span className="truncate text-[11px] font-medium leading-none text-foreground/80">{item.subtitle}</span>
           <span className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">{item.desc}</span>
         </span>
@@ -629,13 +834,14 @@ function taskStateLabel(locale: Locale, state: TaskState): string {
   return t(locale, "task.state.interrupted");
 }
 
-function TaskCenter({ tasks, filter, selectedTask, onFilter, onSelect, onCancelTask }: { tasks: TaskSummary[]; filter: "all" | "running" | "completed" | "failed"; selectedTask: TaskSummary | null; onFilter: (filter: "all" | "running" | "completed" | "failed") => void; onSelect: (task: TaskSummary) => void; onCancelTask: (id: string) => void }) {
+function TaskCenter({ tasks, filter, selectedTask, onFilter, onSelect, onCancelTask }: { tasks: TaskSummary[]; filter: "all" | "running" | "queued" | "completed" | "failed"; selectedTask: TaskSummary | null; onFilter: (filter: "all" | "running" | "queued" | "completed" | "failed") => void; onSelect: (task: TaskSummary) => void; onCancelTask: (id: string) => void }) {
   const locale = useRecutLocale();
   const groups = new Map<string, TaskSummary[]>();
   tasks.forEach((task) => { const date = task.createdAt.slice(0, 10); groups.set(date, [...(groups.get(date) ?? []), task]); });
-  const filters: { id: "all" | "running" | "completed" | "failed"; label: string }[] = [
+  const filters: { id: "all" | "running" | "queued" | "completed" | "failed"; label: string }[] = [
     { id: "all", label: t(locale, "task.filter.all") },
     { id: "running", label: t(locale, "task.filter.running") },
+    { id: "queued", label: t(locale, "task.filter.queued") },
     { id: "completed", label: t(locale, "task.state.done") },
     { id: "failed", label: t(locale, "task.state.failed") },
   ];
@@ -728,8 +934,8 @@ function StepFooter({ step, total, busy, onBack, onNext, onFinish, finishDisable
   </div>;
 }
 
-function ControlSection({ title, eyebrow, children }: { title: string; eyebrow: string; children: ReactNode }) {
-  return <section className="grid gap-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{eyebrow}</p><h2 className="mt-0.5 text-sm font-semibold">{title}</h2></div>{children}</section>;
+function ControlSection({ title, eyebrow, children }: { title: string; eyebrow?: string; children: ReactNode }) {
+  return <section className="grid gap-3"><div>{eyebrow && <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{eyebrow}</p>}<h2 className={cn("text-sm font-semibold", !eyebrow && "mt-0")}>{title}</h2></div>{children}</section>;
 }
 
 function ModelSelect({ disabled, model, onChange }: { disabled: boolean; model: SpeechModel; onChange: (value: SpeechModel) => void }) {
@@ -766,7 +972,7 @@ function SourceButtons({ busy, onChoose, selectedLabel, onUpload, media }: { bus
   </div>;
 }
 
-function TranscribeControls({ busy, downloadSource, language, model, readySpeechModel, setDownloadSource, setLanguage, setModel, sourceAsset, upload, onChoose, onRun, onInstall, step, onBack, onNext }: { busy: string | null; downloadSource: DownloadSource; language: Language; model: SpeechModel; readySpeechModel: boolean; setDownloadSource: (value: DownloadSource) => void; setLanguage: (value: Language) => void; setModel: (value: SpeechModel) => void; sourceAsset: MediaAsset | null; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void; step: number; onBack: () => void; onNext: () => void }) {
+function TranscribeControls({ busy, language, model, readySpeechModel, setLanguage, setModel, sourceAsset, upload, onChoose, onRun, onOpenSettings, step, onBack, onNext }: { busy: string | null; language: Language; model: SpeechModel; readySpeechModel: boolean; setLanguage: (value: Language) => void; setModel: (value: SpeechModel) => void; sourceAsset: MediaAsset | null; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onOpenSettings: (focus: "environment" | "asr" | "tts") => void; step: number; onBack: () => void; onNext: () => void }) {
   const locale = useRecutLocale();
   const total = 3;
   return <div className="flex flex-col gap-6">
@@ -776,8 +982,7 @@ function TranscribeControls({ busy, downloadSource, language, model, readySpeech
     </ControlSection>}
     {step === 1 && <ControlSection eyebrow={t(locale, "controls.model.eyebrow")} title={t(locale, "controls.model.weightsTitle")}>
       <ModelSelect disabled={busy !== null} model={model} onChange={setModel} />
-      <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
-      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "downloaded")}</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />{t(locale, "download.model")}</Button>}
+      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "downloaded")}</p> : <div className="grid gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs"><p className="text-amber-600">{t(locale, "controls.model.missing")}</p><Button disabled={busy !== null} onClick={() => onOpenSettings("asr")} type="button" variant="outline" size="sm" className="w-fit">{t(locale, "settings.open")}</Button></div>}
     </ControlSection>}
     {step === 2 && <ControlSection eyebrow={t(locale, "controls.language.eyebrow")} title={t(locale, "controls.language.title")}>
       <div className="grid grid-cols-3 gap-1 rounded-md border bg-muted/50 p-1">{languages.map((item) => <Button className={cn(language === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setLanguage(item.id)} type="button" variant="ghost" size="sm">{t(locale, item.labelKey)}</Button>)}</div>
@@ -786,7 +991,7 @@ function TranscribeControls({ busy, downloadSource, language, model, readySpeech
   </div>;
 }
 
-function CharacterControls({ busy, characterAsset, characterName, downloadSource, model, readySpeechModel, setDownloadSource, setCharacterName, setModel, upload, onChoose, onRun, onInstall, onDesignVoice, step, onBack, onNext }: { busy: string | null; characterAsset: MediaAsset | null; characterName: string; downloadSource: DownloadSource; model: SpeechModel; readySpeechModel: boolean; setDownloadSource: (value: DownloadSource) => void; setCharacterName: (value: string) => void; setModel: (value: SpeechModel) => void; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void; onDesignVoice: () => void; step: number; onBack: () => void; onNext: () => void }) {
+function CharacterControls({ busy, characterAsset, characterName, model, readySpeechModel, setCharacterName, setModel, upload, onChoose, onRun, onOpenSettings, step, onBack, onNext }: { busy: string | null; characterAsset: MediaAsset | null; characterName: string; model: SpeechModel; readySpeechModel: boolean; setCharacterName: (value: string) => void; setModel: (value: SpeechModel) => void; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onOpenSettings: (focus: "environment" | "asr" | "tts") => void; step: number; onBack: () => void; onNext: () => void }) {
   const locale = useRecutLocale();
   const total = 2;
   return <div className="flex flex-col gap-6">
@@ -798,18 +1003,16 @@ function CharacterControls({ busy, characterAsset, characterName, downloadSource
         <Label htmlFor="character-name" className="text-xs text-muted-foreground">{t(locale, "character.name.label")}</Label>
         <Input disabled={busy !== null} id="character-name" onChange={(event) => setCharacterName(event.target.value)} placeholder={t(locale, "character.name.placeholder")} value={characterName} />
       </div>
-      <Button disabled={busy !== null} onClick={onDesignVoice} type="button" variant="outline" className="w-fit"><Wand2 className="size-3.5" />{t(locale, "design.button")}</Button>
     </ControlSection>}
     {step === 1 && <ControlSection eyebrow={t(locale, "controls.model.eyebrow")} title={t(locale, "controls.character.promptModelTitle")}>
       <ModelSelect disabled={busy !== null} model={model} onChange={setModel} />
-      <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
-      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "downloaded")}</p> : <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />{t(locale, "download.model")}</Button>}
+      {readySpeechModel ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "downloaded")}</p> : <div className="grid gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs"><p className="text-amber-600">{t(locale, "controls.model.missing")}</p><Button disabled={busy !== null} onClick={() => onOpenSettings("asr")} type="button" variant="outline" size="sm" className="w-fit">{t(locale, "settings.open")}</Button></div>}
     </ControlSection>}
     <StepFooter busy={busy} finishDisabled={busy !== null || !characterAsset || !characterName.trim() || !readySpeechModel} finishLabel={busy === "character" ? <><LoaderCircle className="size-4 animate-spin" />{t(locale, "controls.character.title")}</> : <><Mic className="size-4" />{t(locale, "controls.character.title")}</>} onBack={onBack} onFinish={onRun} onNext={onNext} step={step} total={total} />
   </div>;
 }
 
-function SynthesizeControls({ busy, characters, playingPresetId, preparingPresetId, presets, presetsError, downloadSource, engine, engineNeedsCharacter, engineReady, setDownloadSource, setEngine, setSynthesisCharacterId, setSynthesisPresetId, setSynthesisText, setStyle, setVoxcpmVersion, style, synthesisCharacterId, synthesisPresetId, synthesisText, voxcpmEngine, voxcpmVersion, onInstall, onInstallVoxCpm, onRetryVoxCpmRuntime, onPreparePreset, onRun, step, onBack, onNext }: { busy: string | null; characters: VoiceCharacter[]; playingPresetId: string; preparingPresetId: string; presets: VoicePreset[]; presetsError: string; downloadSource: DownloadSource; engine: EngineFamily; engineNeedsCharacter: boolean; engineReady: boolean; setDownloadSource: (value: DownloadSource) => void; setEngine: (value: EngineFamily) => void; setSynthesisCharacterId: (value: string) => void; setSynthesisPresetId: (value: string) => void; setSynthesisText: (value: string) => void; setStyle: (value: VoiceStyle) => void; setVoxcpmVersion: (value: VoxCpmVersion) => void; style: VoiceStyle; synthesisCharacterId: string; synthesisPresetId: string; synthesisText: string; voxcpmEngine: VoxCpmEngineStatus | null; voxcpmVersion: VoxCpmVersion; onInstall: () => void; onInstallVoxCpm: (version: VoxCpmVersion) => void; onRetryVoxCpmRuntime: () => void; onPreparePreset: (presetId: string, announce: boolean) => void; onRun: () => void; step: number; onBack: () => void; onNext: () => void }) {
+function SynthesizeControls({ busy, characters, playingPresetId, preparingPresetId, presets, presetsError, engine, engineNeedsCharacter, engineReady, setEngine, setSynthesisCharacterId, setSynthesisPresetId, setSynthesisText, setStyle, setVoxcpmVersion, style, synthesisCharacterId, synthesisPresetId, synthesisText, voxcpmEngine, voxcpmVersion, onPreparePreset, onOpenSettings, onRun, step, onBack, onNext }: { busy: string | null; characters: VoiceCharacter[]; playingPresetId: string; preparingPresetId: string; presets: VoicePreset[]; presetsError: string; engine: EngineFamily; engineNeedsCharacter: boolean; engineReady: boolean; setEngine: (value: EngineFamily) => void; setSynthesisCharacterId: (value: string) => void; setSynthesisPresetId: (value: string) => void; setSynthesisText: (value: string) => void; setStyle: (value: VoiceStyle) => void; setVoxcpmVersion: (value: VoxCpmVersion) => void; style: VoiceStyle; synthesisCharacterId: string; synthesisPresetId: string; synthesisText: string; voxcpmEngine: VoxCpmEngineStatus | null; voxcpmVersion: VoxCpmVersion; onPreparePreset: (presetId: string, announce: boolean) => void; onOpenSettings: (focus: "environment" | "asr" | "tts") => void; onRun: () => void; step: number; onBack: () => void; onNext: () => void }) {
   const locale = useRecutLocale();
   const isVoxCpm = engine !== "cosyvoice2";
   const selectedVersion = voxcpmVersions.find((item) => item.id === voxcpmVersion) ?? voxcpmVersions[0];
@@ -832,17 +1035,14 @@ function SynthesizeControls({ busy, characters, playingPresetId, preparingPreset
           </Select>
           {voxcpmModel && <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
             <span className="grid min-w-0 gap-0.5"><strong className="truncate text-xs font-medium">{t(locale, selectedVersion.labelKey)}</strong><small className="truncate text-[11px] text-muted-foreground">{tF(locale, "voxcpm.size", { size: voxcpmModel.sizeGb.toFixed(1) })} · {t(locale, selectedVersion.noteKey)}</small></span>
-            {voxcpmModel.ready ? <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-primary"><Check className="size-3" />{tF(locale, "voxcpm.ready", { label: t(locale, selectedVersion.labelKey) })}</span> : <Button disabled={busy !== null || Boolean(voxcpmEngine && !voxcpmEngine.runtime)} onClick={() => onInstallVoxCpm(voxcpmVersion)} type="button" variant="outline" size="sm"><Download className="size-3.5" />{tF(locale, "voxcpm.download", { size: voxcpmModel.sizeGb.toFixed(1) })}</Button>}
+            {voxcpmModel.ready ? <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-primary"><Check className="size-3" />{tF(locale, "voxcpm.ready", { label: t(locale, selectedVersion.labelKey) })}</span> : <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-amber-600">{t(locale, "controls.voxcpm.missing")}</span>}
           </div>}
+          {voxcpmModel && !voxcpmModel.ready && <Button disabled={busy !== null} onClick={() => onOpenSettings("tts")} type="button" variant="outline" size="sm" className="w-fit">{t(locale, "settings.open")}</Button>}
         </div>
-        {voxcpmEngine && !voxcpmEngine.runtime && <div className="grid gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs"><strong className="text-amber-600">{t(locale, "voxcpm.runtimeMissing")}</strong>{voxcpmEngine.runtimeError && <p className="break-all text-[11px] text-amber-700">{tF(locale, "voxcpm.runtimeError", { error: voxcpmEngine.runtimeError })}</p>}<Button disabled={busy !== null} onClick={onRetryVoxCpmRuntime} type="button" variant="outline" size="sm" className="w-fit"><Download className="size-3.5" />{t(locale, "voxcpm.runtimeInstall")}</Button><p className="text-[11px] text-muted-foreground">{t(locale, "voxcpm.envPrepHint")}</p></div>}
+        {voxcpmEngine && !voxcpmEngine.runtime && <div className="grid gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs"><strong className="text-amber-600">{t(locale, "voxcpm.runtimeMissing")}</strong>{voxcpmEngine.runtimeError && <p className="break-all text-[11px] text-amber-700">{tF(locale, "voxcpm.runtimeError", { error: voxcpmEngine.runtimeError })}</p>}<Button disabled={busy !== null} onClick={() => onOpenSettings("environment")} type="button" variant="outline" size="sm" className="w-fit">{t(locale, "settings.open")}</Button><p className="text-[11px] text-muted-foreground">{t(locale, "voxcpm.envPrepHint")}</p></div>}
         <p className="text-[11px] leading-relaxed text-muted-foreground">{t(locale, "voxcpm.verifyNote")}</p>
-        <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
       </ControlSection> : <>
-        {engineReady ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "tts.ready")}</p> : <ControlSection eyebrow={t(locale, "controls.model.eyebrow")} title={t(locale, "controls.tts.title")}>
-          <DownloadSourceSelect disabled={busy !== null} source={downloadSource} onChange={setDownloadSource} />
-          <Button disabled={busy !== null} onClick={onInstall} type="button" variant="outline"><Download className="size-3.5" />{t(locale, "download.cosyvoice")}</Button>
-        </ControlSection>}
+        {engineReady ? <p className="flex items-center gap-1.5 text-xs font-medium text-primary"><Check className="size-3.5" />{t(locale, "tts.ready")}</p> : <div className="grid gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs"><p className="text-amber-600">{t(locale, "controls.tts.missing")}</p><Button disabled={busy !== null} onClick={() => onOpenSettings("tts")} type="button" variant="outline" size="sm" className="w-fit">{t(locale, "settings.open")}</Button></div>}
       </>}
     </>}
     {step === 1 && <>
@@ -921,7 +1121,8 @@ function TranscriptOutput({ busy, transcript, onEditSegment, onSave }: { busy: s
 
 function CharacterPreview({ busy, character, onRemove, onSave }: { busy: string | null; character: VoiceCharacter; onRemove?: () => void; onSave: () => void }) {
   const locale = useRecutLocale();
-  return <Card><CardHeader className="pb-2"><div className="flex items-center justify-between gap-3"><CardTitle className="min-w-0 truncate text-sm">{character.name}</CardTitle>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div><CardDescription className="text-[11px]">{tF(locale, "character.referenceTranscript", { model: character.model.replace("whisper-", ""), time: timestamp(locale, character.createdAt) })}</CardDescription></CardHeader><CardContent className="grid gap-3"><audio className="w-full" controls preload="metadata" src={character.sampleURL} /><div className="grid gap-1"><p className="text-[11px] font-medium text-muted-foreground">{t(locale, "character.prompt.label")}</p><p className="max-h-32 overflow-auto rounded-md bg-muted/60 p-2.5 text-xs leading-relaxed">{character.promptText || t(locale, "character.prompt.missing")}</p></div></CardContent><CardFooter className="justify-between gap-2"><Button disabled={busy !== null || Boolean(character.sampleAssetId)} onClick={onSave} type="button" variant="outline" size="sm"><Save className="size-3.5" />{character.sampleAssetId ? t(locale, "badge.savedInLibrary") : t(locale, "save.referenceAudio")}</Button>{onRemove && <Button disabled={busy !== null} onClick={onRemove} type="button" variant="ghost" size="sm" className="text-destructive hover:text-destructive"><Trash2 className="size-3.5" />{t(locale, "delete")}</Button>}</CardFooter></Card>;
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  return <Card><CardHeader className="pb-2"><div className="flex items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><CardTitle className="min-w-0 truncate text-sm">{character.name}</CardTitle><Badge className="shrink-0 text-[10px]" variant="outline">{t(locale, originLabelKey(character.origin))}</Badge></div>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div><CardDescription className="text-[11px]">{tF(locale, "character.referenceTranscript", { model: character.model.replace("whisper-", ""), time: timestamp(locale, character.createdAt) })}</CardDescription></CardHeader><CardContent className="grid gap-3"><audio className="w-full" controls preload="metadata" src={character.sampleURL} /><div className="grid gap-1"><p className="text-[11px] font-medium text-muted-foreground">{t(locale, "character.prompt.label")}</p><p className="max-h-32 overflow-auto rounded-md bg-muted/60 p-2.5 text-xs leading-relaxed">{character.promptText || t(locale, "character.prompt.missing")}</p></div></CardContent><CardFooter className="justify-between gap-2"><Button disabled={busy !== null || Boolean(character.sampleAssetId)} onClick={onSave} type="button" variant="outline" size="sm"><Save className="size-3.5" />{character.sampleAssetId ? t(locale, "badge.savedInLibrary") : t(locale, "save.referenceAudio")}</Button>{onRemove && <Button disabled={busy !== null || confirmingRemove} onClick={() => { if (confirmingRemove) { onRemove(); } else { setConfirmingRemove(true); } }} type="button" variant={confirmingRemove ? "destructive" : "ghost"} size="sm"><Trash2 className="size-3.5" />{confirmingRemove ? t(locale, "character.confirmRemove") : t(locale, "delete")}</Button>}</CardFooter></Card>;
 }
 
 function SynthesisOutput({ busy, selected, syntheses, onSave }: { busy: string | null; selected: Synthesis | null; syntheses: Synthesis[]; onSave: (synthesis: Synthesis) => void }) {

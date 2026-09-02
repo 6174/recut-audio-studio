@@ -421,7 +421,7 @@ def cosyvoice_runtime_status() -> dict:
         payload = parse_worker_result(result.stdout.splitlines(keepends=True) + result.stderr.splitlines(keepends=True), result.returncode)
     except RuntimeError as error:
         return {"ready": False, "error": str(error)}
-    return {"ready": True, "versions": payload.get("versions", {})}
+    return {"ready": True, "error": None, "versions": payload.get("versions", {})}
 
 
 def voxcpm_python() -> Path:
@@ -523,7 +523,14 @@ def state(root: Path) -> dict:
             "ready": downloaded and voxcpm_runtime["ready"],
         }
     engines = {
-        "cosyvoice2": {"repository": repository_ready, "model": model_ready, "runtime": tts_runtime["ready"], "ready": repository_ready and model_ready and tts_runtime["ready"]},
+        "cosyvoice2": {
+            "repository": repository_ready,
+            "model": model_ready,
+            "runtime": tts_runtime["ready"],
+            # 设置面板的环境行需要人读错误：worker 自检失败 / venv 缺失 / 仓库未准备。
+            "runtimeError": None if tts_runtime["ready"] else (tts_runtime.get("error") or ("CosyVoice 官方仓库或 Matcha-TTS 子模块尚未准备。" if not repository_ready else None)),
+            "ready": repository_ready and model_ready and tts_runtime["ready"],
+        },
         "voxcpm": {
             "runtime": voxcpm_runtime["ready"],
             "runtimeError": None if voxcpm_runtime["ready"] else voxcpm_runtime.get("error"),

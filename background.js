@@ -1,6 +1,7 @@
 /*
- * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务，CDN 声音预设 manifest（经 audio_runner presets 子命令拉取，内置 bootstrap 兜底）
- * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、声音预设枚举（audio.presets）、预设参考音按需准备（audio.preset.prepare：缓存查 → CDN 下载 + sha256 校验 → 私有 preview URL，供 UI 免手动下载试听）、VoxCPM2 Voice Design / 预设实例化建角色（audio.character.design，origin=design/preset，saveToLibrary 懒入库并回填 assetId）、配音合成（CosyVoice 或 VoxCPM 引擎/版本可选，支持 presetId 参考音，与 characterId 互斥）、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材。audio.transcribe 扩了 saveToLibrary 开关（默认 false=私有产物不自动入库；true=终态懒入库为全局 transcript 素材并幂等去重，一次能力调用完成转写+入库）。转写/列表/详情/状态 op 已标记 capability，可被其他 App 经 ctx.capabilities.invoke 复用。
+ * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录与统一任务账本 audio_tasks（含 queued 排队语义与 payload 重放载荷），ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务（prepare 全量走 ctx.python.prepare，定向 cosyvoice/voxcpm 走 ctx.python.run 执行 bootstrap.py --target），CDN 声音预设 manifest（经 audio_runner presets 子命令拉取，内置 bootstrap 兜底）
+ * [OUTPUT]: 注册环境检查（audio.status，含在途任务清单 tasks）、定向/全量环境准备（audio.prepare target: all|cosyvoice|voxcpm）、下载源设置（audio.settings.set）、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、声音预设枚举（audio.presets）、预设参考音按需准备（audio.preset.prepare：缓存查 → CDN 下载 + sha256 校验 → 私有 preview URL，供 UI 免手动下载试听）、VoxCPM2 Voice Design / 预设实例化建角色（audio.character.design，origin=design/preset，saveToLibrary 懒入库并回填 assetId）、配音合成（CosyVoice 或 VoxCPM 引擎/版本可选，支持 presetId 参考音，与 characterId 互斥）、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材。
+ * 任务并发模型（rfc/2026-09-03-task-queue-and-parallelism.md）：推理类（transcribe/character/design/synthesize）单槽 FIFO 排队串行，环境准备（prepare）单槽排队（等推理排空），模型下载（install）不限并行；提交永不拒绝，空槽立即派发、占槽时入队（返回 job=null + taskId）；pumpQueue（settleAllJobs 结算 + 守卫派发）由 status/tasks.list/提交/取消轮询驱动。旧单在途账本 audio_jobs 退役（启动清扫遗留行）。audio.transcribe 扩了 saveToLibrary 开关（默认 false=私有产物不自动入库；true=终态懒入库为全局 transcript 素材并幂等去重，一次能力调用完成转写+入库）。转写/列表/详情/状态 op 已标记 capability，可被其他 App 经 ctx.capabilities.invoke 复用。
  * [POS]: audio-studio 的唯一业务后端；声音角色须通过质量验收（design/preset 产物按回读验收入账，走同一任务中心），未选角色/预设时使用 CosyVoice 官方默认声音进入 TTS，输出先停留在 App 文件沙箱，绝不生成时自动创建素材库 Asset（除 saveToLibrary:true 的显式授权）。
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
@@ -15,6 +16,10 @@ const KINDS = new Set(["audio", "video"]);
 const LANGUAGES = new Set(["auto", "zh", "en"]);
 const STYLES = new Set(["neutral", "calm", "excited", "gentle"]);
 const ACTIONS = new Set(["prepare", "install", "transcribe", "character", "design", "synthesize"]);
+const PREPARE_TARGETS = new Set(["all", "cosyvoice", "voxcpm"]);
+// 并发分类（rfc task-queue D1）：推理类单槽 FIFO 串行（torch 并行加载会 OOM）；
+// 环境准备单槽串行（venv 重建不可与在途推理并行）；install 纯磁盘/网络、不限并行。
+const INFER_ACTIONS = new Set(["transcribe", "character", "design", "synthesize"]);
 // [preset-fallback:generated] 以下块由 python/publish_presets.py --sync 从 presets/catalog.json 再生成，勿手改。
 const PRESET_BOOTSTRAP_FALLBACK = [
   {"id": "neutral-female", "name": {"zh": "小雅 · 中性女声", "en": "Xiaoya · Neutral Female"}, "scene": "general"},
@@ -67,28 +72,186 @@ function taskName(action, meta) {
   return action;
 }
 
-// 关闭一条任务的账本行（终态）。按 shell_job_id 匹配，因为调用方拿到的 record.job_id 是 shell 任务 id，
-// 而 audio_tasks 的行主键是 App 自己的 task id（id），二者不同列。
-function closeTask(ctx, shellJobID, state, error) {
-  if (!shellJobID) return;
-  ctx.sqlite.execute("update audio_tasks set state = ?, error = ?, resolved_at = ? where shell_job_id = ?", [state, error || "", new Date().toISOString(), shellJobID]);
+// 结算单条在途（running）任务行：查平台 shell 状态，终态则产物记录落终态 + 环境错误存档 + 关任务行。
+// 多任务并发下的唯一结算路径（旧 trackedJob 只结算最新一条，无法覆盖队列时代的并行任务）。
+function settleTaskRow(ctx, row) {
+  const closeWith = (state, error) => {
+    settleOutput(ctx, row.action, row.record_id, { status: state === "completed" ? "completed" : "failed", error: error || "" }, row.shell_job_id);
+    if (row.action === "prepare" || row.action === "install") {
+      let logs = [];
+      try { logs = ctx.shell.logs(row.shell_job_id).slice(-40); } catch (_) { logs = []; }
+      noteEnvOutcome(ctx, { action: row.action, job_id: row.shell_job_id, record_id: row.record_id, started_at: row.created_at }, { status: state, error: error || "" }, logs);
+    }
+    const finalState = state === "completed" ? "completed" : state === "cancelled" ? "cancelled" : state === "interrupted" ? "interrupted" : "failed";
+    closeTaskById(ctx, row.id, finalState, error || "");
+  };
+  let job;
+  try { job = ctx.shell.status(row.shell_job_id); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : "shell job is unavailable";
+    closeWith("interrupted", tr(ctx, `任务记录不可恢复：${message}`, `Task record cannot be recovered: ${message}`));
+    return { settled: true, status: "interrupted", error: "" };
+  }
+  const status = shellJobStatus(job);
+  if (isActiveJob(status)) return { settled: false, status, error: shellJobError(job) };
+  if (!isTerminalJob(status)) {
+    closeWith("interrupted", tr(ctx, `任务状态不可恢复：${status || "empty"}`, `Task status cannot be recovered: ${status || "empty"}`));
+    return { settled: true, status: "interrupted", error: "" };
+  }
+  closeWith(status, shellJobError(job));
+  return { settled: true, status, error: shellJobError(job) };
 }
 
-// 对账：把账本里仍标记 running/queued、但其底层 shell 任务已终态（或不可用）的行，一并落到终态。
-// 支撑「任务即主面板」，避免已结束任务长期停留在「进行中」。
-function reconcileTasks(ctx) {
+// 结算全部在途任务行（queued 行无 shell job，跳过；running 无 job 的崩溃残留直接落 failed）。
+function settleAllJobs(ctx) {
   ensureSchema(ctx);
-  const actives = ctx.sqlite.query("select id, shell_job_id from audio_tasks where state in ('queued','running')");
-  for (const row of actives) {
-    if (!row.shell_job_id) continue;
-    let status = "";
-    try { status = shellJobStatus(ctx.shell.status(row.shell_job_id)); }
-    catch (_) { status = "interrupted"; }
-    if (status === "interrupted" || isTerminalJob(status) || (status && !isActiveJob(status) && !isTerminalJob(status))) {
-      const finalState = status === "completed" ? "completed" : (status === "interrupted" ? "interrupted" : "failed");
-      closeTask(ctx, row.shell_job_id, finalState, status === "interrupted" ? "任务状态不可恢复" : "");
+  const rows = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, created_at from audio_tasks where state in ('queued','running')");
+  for (const row of rows) {
+    if (row.state !== "running") continue;
+    if (!row.shell_job_id) {
+      const message = tr(ctx, "任务未能成功启动。", "The task did not start successfully.");
+      ctx.sqlite.execute("update audio_tasks set state = 'failed', error = ?, resolved_at = ? where id = ? and state = 'running' and shell_job_id = ''", [message, new Date().toISOString(), row.id]);
+      markFailed(ctx, row.action, row.record_id, message);
+      continue;
+    }
+    void settleTaskRow(ctx, row);
+  }
+}
+
+function parseTaskMeta(row) {
+  try { return JSON.parse(row.meta_json || "{}"); } catch (_) { return {}; }
+}
+
+// 推理任务派发前必须完成下载的模型依赖集（D1：权重下载未完成就起推理必然加载坏文件 → 排队等待）。
+// transcribe/character 依赖 ASR 回读模型；design 固定走 VoxCPM2；synthesize 依赖所选引擎权重。
+function inferModelDeps(meta) {
+  const deps = new Set();
+  if (meta.model && ASR_MODELS.has(meta.model)) deps.add(meta.model);
+  if (meta.engine && ENGINES.has(meta.engine)) deps.add(meta.engine);
+  if (meta.origin === "design") deps.add("voxcpm2");
+  return [...deps].filter(Boolean);
+}
+
+// 由 action + 产物记录 + payload（提交时解析后的输入）重建执行参数；与提交时完全一致。
+function buildJobSpec(ctx, action, row, payload) {
+  const p = payload || {};
+  const logPath = row.log_path || taskLogPath(row.id);
+  if (action === "transcribe") {
+    return { args: ["python/audio_runner.py", "transcribe", "--model", p.model, "--language", p.language, "--input", p.sourcePath, "--output", `transcripts/${row.record_id}`, "--task-log", logPath] };
+  }
+  if (action === "character") {
+    return { args: ["python/audio_runner.py", "character", "--model", p.model, "--input", p.sourcePath, "--output", `characters/${row.record_id}/sample`, "--task-log", logPath] };
+  }
+  if (action === "design") {
+    const args = ["python/audio_runner.py", "design-character", "--name", p.name, "--model", p.model, "--output-relative", `characters/${row.record_id}/sample`, "--task-log", logPath];
+    if (p.presetId) args.push("--preset-id", p.presetId);
+    else args.push("--design-desc", p.designDesc);
+    return { args };
+  }
+  if (action === "synthesize") {
+    const args = ["python/audio_runner.py", "synthesize", "--text", p.text, "--style", p.style, "--engine", p.engine, "--output", `syntheses/${row.record_id}.wav`, "--task-log", logPath];
+    if (p.characterId) {
+      const character = ctx.sqlite.query("select id, sample_path, prompt_text from audio_characters where id = ? and status = 'completed'", [p.characterId])[0];
+      if (!character) throw new Error(tr(ctx, "声音角色已不存在（可能在排队期间被删除）。", "The voice character no longer exists (it may have been removed)."));
+      args.push("--reference", character.sample_path, "--prompt-text", character.prompt_text);
+    } else if (p.presetId) args.push("--preset-id", p.presetId);
+    else args.push("--default-voice");
+    return { args };
+  }
+  if (action === "prepare") {
+    const target = p.target || "all";
+    if (target === "all") return { platformPrepare: true };
+    return { args: ["python/bootstrap.py", "--target", target, "--task-log", logPath] };
+  }
+  throw new Error(`Unsupported queue task action: ${action}`);
+}
+
+// 派发一条已认领的任务行：条件认领（queued→running）→ 执行 → 回填 shell_job_id；启动失败则行与记录落 failed。
+function dispatchTask(ctx, row) {
+  const now = new Date().toISOString();
+  ctx.sqlite.execute("update audio_tasks set state = 'running', started_at = ? where id = ? and state = 'queued'", [now, row.id]);
+  let payload = {};
+  try { payload = JSON.parse(row.payload_json || "{}"); } catch (_) { payload = {}; }
+  try {
+    const spec = buildJobSpec(ctx, row.action, row, payload);
+    const job = spec.platformPrepare ? ctx.python.prepare() : ctx.python.run(spec.args);
+    const shellID = shellJobID(job);
+    if (!shellID) throw new Error(tr(ctx, "平台未返回任务 ID。", "The platform did not return a job id."));
+    ctx.sqlite.execute("update audio_tasks set shell_job_id = ? where id = ?", [shellID, row.id]);
+    linkRecordJob(ctx, row.action, row.record_id, shellID);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Task failed to start.";
+    ctx.sqlite.execute("update audio_tasks set state = 'failed', error = ?, resolved_at = ? where id = ?", [message, new Date().toISOString(), row.id]);
+    markFailed(ctx, row.action, row.record_id, message);
+  }
+}
+
+// 队列引擎（D2）：结算全部在途任务 → 按类守卫派发最老排队任务。
+// 环境单槽：等推理（含排队）排空；推理单槽：环境任务在跑、或依赖模型仍在下载时不派发。
+function pumpQueue(ctx) {
+  ensureSchema(ctx);
+  settleAllJobs(ctx);
+  const actives = ctx.sqlite.query("select action, state, meta_json from audio_tasks where state in ('queued','running')");
+  const installing = new Set(actives.filter((row) => row.action === "install" && row.state === "running").map((row) => parseTaskMeta(row).model).filter(Boolean));
+  const inferAny = actives.some((row) => INFER_ACTIONS.has(row.action));
+  const inferRunning = actives.some((row) => INFER_ACTIONS.has(row.action) && row.state === "running");
+  const envRunning = actives.some((row) => row.action === "prepare" && row.state === "running");
+  if (!inferAny) {
+    const next = ctx.sqlite.query("select id, action, record_id, meta_json, log_path from audio_tasks where action = 'prepare' and state = 'queued' order by created_at asc limit 1");
+    if (next.length) void dispatchTask(ctx, next[0]);
+  }
+  if (!inferRunning && !envRunning) {
+    const next = ctx.sqlite.query("select id, action, record_id, meta_json, log_path from audio_tasks where action in ('transcribe','character','design','synthesize') and state = 'queued' order by created_at asc limit 1");
+    if (next.length) {
+      const deps = inferModelDeps(parseTaskMeta(next[0]));
+      if (!deps.some((model) => installing.has(model))) void dispatchTask(ctx, next[0]);
     }
   }
+}
+
+// 任务账本统一提交入口（D2）：只写 audio_tasks 一行；不再强关其他在途任务（排队取代单飞）。
+// install 直接 running（无槽位限制）；推理/环境先 queued，由 pumpQueue 按守卫派发。
+function submitJob(ctx, { action, recordID = "", payload, meta, source, submittedBy, taskId, started = false }) {
+  ensureSchema(ctx);
+  const id = taskId || outputID();
+  const now = new Date().toISOString();
+  const state = started ? "running" : "queued";
+  let metaJson = "{}";
+  try { metaJson = JSON.stringify(meta || {}); } catch (_) { metaJson = "{}"; }
+  let payloadJson = "";
+  try { payloadJson = JSON.stringify(payload || {}); } catch (_) { payloadJson = ""; }
+  const logPath = taskLogPath(id);
+  ctx.sqlite.execute("insert into audio_tasks (id, shell_job_id, action, record_id, source, submitted_by, state, progress, meta_json, payload_json, log_path, error, created_at, started_at, resolved_at) values (?, '', ?, ?, ?, ?, ?, 0, ?, ?, ?, '', ?, ?, ?)", [id, action, recordID, source === "ai" ? "ai" : "manual", submittedBy || "", state, metaJson, payloadJson, logPath, now, started ? now : "", started ? "" : ""]);
+  if (action === "prepare" || action === "install") clearEnvError(ctx);
+  return id;
+}
+
+// 产物记录回填 shell job id（派发成功时；排队期保持空，终态结算不依赖它）。
+function linkRecordJob(ctx, action, recordID, shellID) {
+  const table = RECORD_TABLES[action];
+  if (!table || !recordID || !shellID) return;
+  ctx.sqlite.execute(`update ${table} set job_id = ? where id = ?`, [shellID, recordID]);
+}
+
+// 按任务行 id 关账（终态）；比 closeTask 的 shell_job_id 匹配更精确（排队行无 job 也能关）。
+function closeTaskById(ctx, taskID, state, error) {
+  ctx.sqlite.execute("update audio_tasks set state = ?, error = ?, resolved_at = ? where id = ?", [state, error || "", new Date().toISOString(), taskID]);
+}
+
+// 取消一条任务：queued 直接落 cancelled（产物记录落 failed「已取消」）；running 走平台 cancel。
+function cancelTaskRow(ctx, row) {
+  if (row.state === "queued") {
+    const error = tr(ctx, "已取消（尚未开始）。", "Cancelled before it started.");
+    closeTaskById(ctx, row.id, "cancelled", error);
+    const table = RECORD_TABLES[row.action];
+    if (table && row.record_id) ctx.sqlite.execute(`update ${table} set status = 'failed', error = ? where id = ?`, [error, row.record_id]);
+    return { cancelled: true, id: row.id };
+  }
+  if (row.state === "running" && row.shell_job_id) {
+    try { ctx.shell.cancel(row.shell_job_id); } catch (_) { /* 平台已结算时忽略，下轮结算会落终态 */ }
+    return { cancelled: true, id: row.id };
+  }
+  return { cancelled: false };
 }
 
 // 任务中心主列表（audio.tasks.list）：统一账本任务 + 已有产物的历史快照，合并为「任务记录」主面板。
@@ -96,20 +259,19 @@ function reconcileTasks(ctx) {
 // 让「历史」与「执行日志」全部收敛到任务列表，而不再另设历史面板。
 function listTasks(ctx, input = {}) {
   ensureSchema(ctx);
-  trackedJob(ctx); // 结算当前在途任务（settleOutput + closeTask）
-  reconcileTasks(ctx); // 对账所有 running/queued 行的实际终态，让历史任务不再停留在「进行中」
+  pumpQueue(ctx); // 结算 + 派发（UI 1.5s 轮询驱动队列推进）
   migrateLegacyTasks(ctx); // 一次性把既有产物并入账本；此后 audio_tasks 是唯一真相源
   const source = value(input, "source");
   const status = value(input, "status");
   const action = value(input, "action");
   const limit = Math.min(Math.max(Number(input.limit) || 50, 1), 200);
 
-  const jobs = ctx.sqlite.query("select id, action, record_id, source, submitted_by, state, progress, meta_json, created_at from audio_tasks").map(toTaskSummary);
+  const jobs = ctx.sqlite.query("select id, shell_job_id, action, record_id, source, submitted_by, state, progress, meta_json, error, created_at, started_at from audio_tasks").map(toTaskSummary);
   const all = jobs.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
   const filtered = all.filter((task) => {
     if (source === "ai" || source === "manual") { if (task.source !== source) return false; }
     if (action && ACTIONS.has(action) && task.action !== action) return false;
-    if (status === "running") { if (!isActiveJob(task.state)) return false; }
+    if (status === "running") { if (task.state !== "running") return false; }
     else if (status === "queued") { if (task.state !== "queued") return false; }
     else if (status === "done") { if (task.state !== "completed") return false; }
     else if (status === "failed") { if (task.state !== "failed") return false; }
@@ -139,12 +301,13 @@ function toTaskSummary(task) {
   const raw = task.meta_json ?? task.meta;
   if (typeof raw === "string") { try { meta = JSON.parse(raw); } catch (_) { /* keep empty */ } }
   else if (raw && typeof raw === "object") { meta = raw; }
-  return { id: task.id, action: task.action, name: taskName(task.action, meta), recordId: task.recordId || task.record_id || "", source: task.source, submittedBy: task.submittedBy || task.submitted_by || "", state: task.state, progress: task.progress, createdAt: task.createdAt || task.created_at, meta };
+  return { id: task.id, action: task.action, name: taskName(task.action, meta), recordId: task.recordId || task.record_id || "", source: task.source, submittedBy: task.submittedBy || task.submitted_by || "", state: task.state, progress: task.progress, createdAt: task.createdAt || task.created_at, startedAt: task.startedAt || task.started_at || "", jobId: task.jobId || task.shell_job_id || "", error: task.error || "", meta };
 }
 
 // 任务中心详情（audio.task.get）。
 function getTask(ctx, input) {
   ensureSchema(ctx);
+  pumpQueue(ctx); // 结算 + 派发，保证详情读到的是最新状态
   const id = value(input, "id");
   const rows = ctx.sqlite.query("select id, action, record_id, source, submitted_by, state, progress, meta_json, log_path, error, created_at, started_at, resolved_at from audio_tasks where id = ?", [id]);
   if (!rows.length) throw new Error("Audio task was not found.");
@@ -166,7 +329,7 @@ function inferLogLevel(message) {
 // 终态后回退读 tasks/${id}.log 的 JSON-lines，保证「结束后仍可回看」。
 function readTaskLogs(ctx, input) {
   ensureSchema(ctx);
-  trackedJob(ctx); // 结算在途任务，保证读取详情时状态与日志同步落到终态。
+  pumpQueue(ctx); // 结算 + 派发，保证读取详情时状态与日志同步落到终态
   const id = value(input, "id");
   const rows = ctx.sqlite.query("select log_path, shell_job_id, state from audio_tasks where id = ?", [id]);
   if (!rows.length) return { logs: [], nextCursor: null }; // 历史产物快照任务无随任务日志，返回空。
@@ -233,6 +396,10 @@ function ensureSchema(ctx) {
   ensureColumn(ctx, "audio_characters", "origin", "text not null default 'clone'");
   // design 产物 saveToLibrary:true 的懒入库标记（终态后幂等导入素材库并回填 assetId）。
   ensureColumn(ctx, "audio_characters", "save_to_library", "integer not null default 0");
+  // 排队重放载荷（RFC task-queue D2）：提交时的原始输入，供延迟派发重建执行参数。
+  ensureColumn(ctx, "audio_tasks", "payload_json", "text not null default ''");
+  // 单在途账本退役（RFC task-queue D2）：旧版本遗留的未决行一次性清扫，新代码以 audio_tasks 为唯一真相源。
+  ctx.sqlite.execute("update audio_jobs set resolved_at = ? where resolved_at = ''", [new Date().toISOString()]);
 }
 
 function ensureColumn(ctx, table, column, definition) {
@@ -297,73 +464,26 @@ function settleOutput(ctx, action, recordID, job, jobID = "") {
   ctx.sqlite.execute(`update ${table} set status = ?, error = ? where id = ?`, [outputStatus(job.status), errorText, recordID]);
 }
 
-function resolveTrackedJob(ctx, record, job) {
-  settleOutput(ctx, record.action, record.record_id, job, record.job_id);
-  const logs = ctx.shell.logs(record.job_id).slice(-80);
-  noteEnvOutcome(ctx, record, job, logs);
-  closeTask(ctx, record.job_id, outputStatus(job.status), job.error || "");
-  return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: job.status, error: job.error || "", logs };
-}
-
+// 「当前在途任务」（audio.status / audio.job）：audio_tasks 最新一条非终态行，合成旧 ActiveAudioJob 形状。
+// 只结算、不派发（队列推进由 pumpQueue 的显式调用点驱动）；queued 行 shell_job_id 为空（尚未派发）。
 function trackedJob(ctx) {
-  ensureSchema(ctx);
-  const rows = ctx.sqlite.query("select job_id, action, record_id, started_at from audio_jobs where resolved_at = '' order by started_at desc limit 1");
+  settleAllJobs(ctx);
+  const rows = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, error, created_at, started_at from audio_tasks where state in ('queued','running') order by created_at desc limit 1");
   if (!rows.length) return null;
-  const record = rows[0];
-  if (!record.job_id || !ACTIONS.has(record.action)) {
-    ctx.sqlite.execute("update audio_jobs set resolved_at = ? where job_id = ?", [new Date().toISOString(), record.job_id]);
-    return null;
-  }
-  let job;
-  try { job = ctx.shell.status(record.job_id); }
-  catch (error) {
-    const message = error instanceof Error ? error.message : "shell job is unavailable";
-    const interrupted = { status: "interrupted", error: tr(ctx, `任务记录不可恢复：${message}`, `Task record cannot be recovered: ${message}`) };
-    settleOutput(ctx, record.action, record.record_id, interrupted, record.job_id);
-    noteEnvOutcome(ctx, record, interrupted, []);
-    closeTask(ctx, record.job_id, "interrupted", interrupted.error);
-    return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
-  }
-  const status = shellJobStatus(job);
-  // 仍在运行的任务只回传运行视图；只有终态才允许结算，避免轮询把 running 任务误标为 failed。
-  if (isActiveJob(status)) {
-    return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status, error: shellJobError(job), logs: [] };
-  }
-  if (!isTerminalJob(status)) {
-    const interrupted = { status: "interrupted", error: tr(ctx, `任务状态不可识别：${status || "empty"}`, `Task status unrecognized: ${status || "empty"}`) };
-    settleOutput(ctx, record.action, record.record_id, interrupted, record.job_id);
-    noteEnvOutcome(ctx, record, interrupted, []);
-    closeTask(ctx, record.job_id, "interrupted", interrupted.error);
-    return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
-  }
-  return resolveTrackedJob(ctx, record, { status, error: shellJobError(job) });
+  const row = rows[0];
+  return { id: row.shell_job_id, action: row.action, recordID: row.record_id, startedAt: row.started_at || row.created_at, status: row.state, error: row.error || "", logs: [] };
 }
 
-function ensureNoActiveJob(ctx) {
-  ensureSchema(ctx);
-  const existing = trackedJob(ctx);
-  if (existing && isActiveJob(existing.status)) throw new Error(tr(ctx, "声音工坊已有任务正在执行，请等待完成或先取消。", "Audio Studio already has a task running; wait for it to finish or cancel it first."));
-  if (existing) ctx.sqlite.execute("update audio_jobs set resolved_at = ? where job_id = ?", [new Date().toISOString(), existing.id]);
-}
-
-function trackJob(ctx, job, action, recordID = "", opts = {}) {
-  ensureSchema(ctx);
-  const shellID = shellJobID(job);
-  if (!shellID || !ACTIONS.has(action)) throw new Error("Audio task did not return a valid shell job id.");
-  const id = opts.taskId || outputID();
-  const now = new Date().toISOString();
-  const source = opts.source === "ai" ? "ai" : "manual";
-  const submittedBy = value(opts, "submittedBy");
-  let meta = "{}";
-  try { meta = JSON.stringify(opts.meta || {}); } catch (_) { meta = "{}"; }
-  const logPath = taskLogPath(id);
-  // 关闭上一条仍在途的任务，保证「单在途」语义（与 audio_jobs 一致）。
-  ctx.sqlite.execute("update audio_jobs set resolved_at = ? where resolved_at = ''", [now]);
-  ctx.sqlite.execute("insert into audio_jobs (job_id, action, record_id, started_at, resolved_at) values (?, ?, ?, ?, '')", [shellID, action, recordID, now]);
-  ctx.sqlite.execute("update audio_tasks set resolved_at = ? where resolved_at = '' and state in ('queued','running')", [now]);
-  ctx.sqlite.execute("insert into audio_tasks (id, shell_job_id, action, record_id, source, submitted_by, state, progress, meta_json, log_path, error, created_at, started_at, resolved_at) values (?, ?, ?, ?, ?, ?, 'running', 0, ?, ?, '', ?, ?, '')", [id, shellID, action, recordID, source, submittedBy, meta, logPath, now, now]);
-  if (action === "prepare" || action === "install") clearEnvError(ctx);
-  return job;
+// 任务行对应的在途 shell job（提交 op 的返回值用）：queued 或无 job → null（即「已排队」）。
+function jobForTask(ctx, row) {
+  if (!row || row.state === "queued" || !row.shell_job_id) return null;
+  const base = { id: row.shell_job_id, action: row.action, recordID: row.record_id, startedAt: row.started_at || row.created_at, logs: [] };
+  try {
+    const job = ctx.shell.status(row.shell_job_id);
+    return { ...base, status: shellJobStatus(job), error: shellJobError(job) };
+  } catch (_) {
+    return { ...base, status: row.state, error: "" };
+  }
 }
 
 function markFailed(ctx, action, recordID, error) {
@@ -402,38 +522,32 @@ function noteEnvOutcome(ctx, record, job, logs = []) {
   storeEnvError(ctx, record.action, record.job_id, meaningfulError(ctx, tail, job.error), tail);
 }
 
-function activeTaskOf(ctx, shellJobId) {
-  if (!shellJobId) return null;
-  const rows = ctx.sqlite.query("select id, action, record_id, source, submitted_by, state, progress, meta_json, log_path, error, created_at from audio_tasks where shell_job_id = ? and resolved_at = '' order by created_at desc limit 1", [shellJobId]);
-  if (!rows.length) return null;
-  const row = rows[0];
-  let meta = {};
-  try { meta = JSON.parse(row.meta_json || "{}"); } catch (_) { /* keep empty */ }
-  return { id: row.id, action: row.action, name: taskName(row.action, meta), recordId: row.record_id, source: row.source, submittedBy: row.submittedBy, state: row.state, progress: row.progress, createdAt: row.createdAt, meta, logPath: row.log_path };
-}
-
 function status(_, ctx) {
-  const activeJob = trackedJob(ctx);
-  const activeTask = activeTaskOf(ctx, activeJob && isActiveJob(activeJob.status) ? activeJob.id : null);
+  ensureSchema(ctx);
+  pumpQueue(ctx); // 结算 + 派发（UI 轮询驱动队列推进）
+  const rows = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, progress, meta_json, error, created_at, started_at from audio_tasks where state in ('queued','running') order by created_at asc");
+  const tasks = rows.map(toTaskSummary);
+  const latest = rows.length ? toTaskSummary(rows[rows.length - 1]) : null;
+  const activeJob = latest ? { id: latest.jobId, action: latest.action, recordID: latest.recordId, startedAt: latest.startedAt || latest.createdAt, status: latest.state, error: latest.error, logs: [] } : null;
   const environment = ctx.python.status();
   const envError = envErrorRow(ctx);
   let envFailure = null;
   if (envError && envError.error) {
     let storedLogs = [];
-    try { storedLogs = JSON.parse(envError.logs || "[]"); } catch (_) { /* keep empty */ }
+    try { storedLogs = JSON.parse(envError.logs || "[]"); } catch (_) { storedLogs = []; }
     envFailure = { setupError: envError.error, setupLogs: storedLogs };
   }
   if (!environment.ready) {
     return {
       ready: false, pending: true, modelsRoot: "~/.recut/models/audio-studio",
       error: envFailure ? tr(ctx, `运行环境准备失败：${envFailure.setupError}`, `Runtime setup failed: ${envFailure.setupError}`) : environment.error || tr(ctx, "Python 运行环境尚未就绪。", "The Python runtime is not ready yet."),
-      asr: { installed: [] }, tts: { ready: false }, downloadSource: downloadSource(ctx), activeJob, activeTask,
+      asr: { installed: [] }, tts: { ready: false }, downloadSource: downloadSource(ctx), activeJob, activeTask: latest, tasks,
       ...(envFailure || {}),
     };
   }
   const runner = run(ctx, ["status"], 20);
   // 保证 asr/tts 契约稳定：即便 runner status 载荷缺字段，也给 UI 兜底为空对象/空数组。
-  const result = { ...runner, asr: runner.asr || { installed: [] }, tts: runner.tts || { ready: false }, downloadSource: downloadSource(ctx), activeJob, activeTask };
+  const result = { ...runner, asr: runner.asr || { installed: [] }, tts: runner.tts || { ready: false }, downloadSource: downloadSource(ctx), activeJob, activeTask: latest, tasks };
   if (!runner.ready) {
     result.ready = false;
     if (envFailure) {
@@ -448,11 +562,24 @@ function status(_, ctx) {
   return result;
 }
 
-function prepare(_, ctx) {
-  ensureNoActiveJob(ctx);
+function prepare(input, ctx) {
+  const target = value(input, "target") || "all";
+  if (!PREPARE_TARGETS.has(target)) throw new Error(tr(ctx, "target 必须是 all、cosyvoice 或 voxcpm。", "target must be all, cosyvoice or voxcpm"));
+  // 排队语义（RFC task-queue）：不再拒绝，先结算再入队；环境单槽会在推理排空后由 pumpQueue 自动派发。
+  pumpQueue(ctx);
   const tid = outputID();
-  const job = trackJob(ctx, ctx.python.prepare(), "prepare", "", { taskId: tid, meta: { type: "运行环境" } });
-  return { job, taskId: tid };
+  submitJob(ctx, { action: "prepare", payload: { target }, meta: { type: tr(ctx, "运行环境", "Runtime environment"), target }, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid });
+  pumpQueue(ctx);
+  const row = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, started_at, error from audio_tasks where id = ?", [tid])[0];
+  return { job: jobForTask(ctx, row), taskId: tid };
+}
+
+// audio.settings.set：持久化下载源设置（设置面板变更即写入；audio.install 调用时也会同步写入同一键）。
+function settingsSet(input, ctx) {
+  ensureSchema(ctx);
+  const source = value(input, "downloadSource");
+  if (source) setDownloadSource(ctx, source);
+  return { downloadSource: downloadSource(ctx) };
 }
 
 function install(input, ctx) {
@@ -460,12 +587,13 @@ function install(input, ctx) {
   const dlSource = value(input, "source") || downloadSource(ctx);
   if (!ASR_MODELS.has(selected) && selected !== "cosyvoice2" && !VOXCPM_MODELS.includes(selected)) throw new Error("model must be an ASR model, cosyvoice2 or a VoxCPM version");
   setDownloadSource(ctx, dlSource);
-  ensureNoActiveJob(ctx);
+  // 下载无槽位限制（纯磁盘/网络，RFC task-queue D1）：并行安全，提交即跑，不入队。
   const tid = outputID();
   const logPath = taskLogPath(tid);
   const job = ctx.python.run(["python/audio_runner.py", "install", "--model", selected, "--source", dlSource, "--task-log", logPath]);
   const meta = { type: ASR_MODELS.has(selected) ? "ASR 模型" : "TTS 模型", model: selected };
-  trackJob(ctx, job, "install", "", { taskId: tid, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), meta });
+  submitJob(ctx, { action: "install", payload: { model: selected, source: dlSource }, meta, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid, started: true });
+  ctx.sqlite.execute("update audio_tasks set shell_job_id = ? where id = ?", [shellJobID(job), tid]);
   return { job, taskId: tid };
 }
 
@@ -477,7 +605,7 @@ function transcribe(input, ctx) {
   const language = value(input, "language");
   const saveToLibrary = input.saveToLibrary === true || String(input.saveToLibrary || "").trim().toLowerCase() === "true";
   if (!assetID || !KINDS.has(kind) || !ASR_MODELS.has(model) || !LANGUAGES.has(language)) throw new Error("assetId, kind, model and language are required");
-  ensureNoActiveJob(ctx);
+  pumpQueue(ctx); // 先结算释放槽位；推理单槽被占时提交照收（入队等待，RFC task-queue）
   // saveToLibrary 幂等去重：同源+同模型+同语言且已入库的已完成转写直接复用，不重复起 job、不产生重复全局资产。
   if (saveToLibrary) {
     const reuse = ctx.sqlite.query("select id, saved_asset_id from audio_transcripts where status = 'completed' and save_to_library = 1 and saved_asset_id != '' and source_asset_id = ? and model = ? and language = ? order by created_at desc limit 1", [assetID, model, language]);
@@ -490,17 +618,11 @@ function transcribe(input, ctx) {
   const record = { id, sourceAssetId: assetID, sourceKind: kind, model, language, saveToLibrary, srtPath: `${stem}.srt`, jsonPath: `${stem}.json`, audioPath: `${stem}.audio.wav`, savedAssetId: "", duration: 0, createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
   ctx.sqlite.execute("insert into audio_transcripts (id, source_asset_id, source_kind, model, language, save_to_library, srt_path, json_path, audio_path, saved_asset_id, duration, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.sourceAssetId, record.sourceKind, record.model, record.language, record.saveToLibrary ? 1 : 0, record.srtPath, record.jsonPath, record.audioPath, record.savedAssetId, record.duration, record.createdAt, record.jobId, record.status, record.error]);
   const tid = outputID();
-  const logPath = taskLogPath(tid);
-  try {
-    const job = ctx.python.run(["python/audio_runner.py", "transcribe", "--model", model, "--language", language, "--input", source.path, "--output", stem, "--task-log", logPath]);
-    const tracked = trackJob(ctx, job, "transcribe", id, { taskId: tid, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), meta: { type: "转写", model, language, sourceAssetId: assetID, sourceKind: kind } });
-    record.jobId = shellJobID(tracked);
-    ctx.sqlite.execute("update audio_transcripts set job_id = ? where id = ?", [record.jobId, id]);
-    return { job: tracked, taskId: tid, transcript: { id } };
-  } catch (error) {
-    markFailed(ctx, "transcribe", id, error);
-    throw error;
-  }
+  // 排队重放载荷：materialize 后的沙箱路径随 payload 保存（等待期只依赖 App 沙箱副本，不重读素材库）。
+  submitJob(ctx, { action: "transcribe", recordID: id, payload: { model, language, sourcePath: source.path }, meta: { type: "转写", model, language, sourceAssetId: assetID, sourceKind: kind }, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid });
+  pumpQueue(ctx); // 空槽立即派发；占槽则保持 queued，由后续轮询按 FIFO 自动启动
+  const row = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, started_at, error from audio_tasks where id = ?", [tid])[0];
+  return { job: jobForTask(ctx, row), taskId: tid, transcript: { id } };
 }
 
 // saveToLibrary 懒终态：记录已完成且要求入库但还没入库时，幂等补一次 importTranscript。
@@ -591,7 +713,7 @@ function characterCreate(input, ctx) {
   const name = value(input, "name");
   const model = value(input, "model");
   if (!assetID || !name || !ASR_MODELS.has(model)) throw new Error("assetId, name and model are required");
-  ensureNoActiveJob(ctx);
+  pumpQueue(ctx);
   const source = ctx.media.materialize(assetID);
   if (source.kind !== "audio") throw new Error(`Selected Asset is ${source.kind}, not audio.`);
   const id = outputID();
@@ -599,17 +721,10 @@ function characterCreate(input, ctx) {
   const record = { id, name, model, samplePath: `${stem}.wav`, sampleAssetId: "", promptText: "", createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
   ctx.sqlite.execute("insert into audio_characters (id, name, model, sample_path, sample_asset_id, prompt_text, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.name, record.model, record.samplePath, record.sampleAssetId, record.promptText, record.createdAt, record.jobId, record.status, record.error]);
   const tid = outputID();
-  const logPath = taskLogPath(tid);
-  try {
-    const job = ctx.python.run(["python/audio_runner.py", "character", "--model", model, "--input", source.path, "--output", stem, "--task-log", logPath]);
-    const tracked = trackJob(ctx, job, "character", id, { taskId: tid, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), meta: { type: "声音角色", model, characterName: name, sourceAssetId: assetID } });
-    record.jobId = shellJobID(tracked);
-    ctx.sqlite.execute("update audio_characters set job_id = ? where id = ?", [record.jobId, id]);
-    return { job: tracked, taskId: tid, character: { id } };
-  } catch (error) {
-    markFailed(ctx, "character", id, error);
-    throw error;
-  }
+  submitJob(ctx, { action: "character", recordID: id, payload: { model, name, sourcePath: source.path }, meta: { type: "声音角色", model, characterName: name, sourceAssetId: assetID }, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid });
+  pumpQueue(ctx);
+  const row = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, started_at, error from audio_tasks where id = ?", [tid])[0];
+  return { job: jobForTask(ctx, row), taskId: tid, character: { id } };
 }
 
 // audio.presets：声音预设清单（CDN manifest 权威源，bootstrap 兜底；只读无副作用，结果不落库）。
@@ -652,28 +767,18 @@ function characterDesign(input, ctx) {
   if (designDesc && presetId) throw new Error(tr(ctx, "designDesc 与 presetId 互斥，请二选一。", "designDesc and presetId are mutually exclusive."));
   if (designDesc && designDesc.length > 120) throw new Error(tr(ctx, "designDesc 不能超过 120 字。", "designDesc must be 120 characters or fewer."));
   if (!ASR_MODELS.has(model)) throw new Error("model must be an ASR model");
-  ensureNoActiveJob(ctx);
+  pumpQueue(ctx);
   const id = outputID();
   const stem = `characters/${id}/sample`;
   const origin = presetId ? "preset" : "design";
   const record = { id, name, model, samplePath: `${stem}.wav`, sampleAssetId: "", promptText: "", origin, saveToLibrary, createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
   ctx.sqlite.execute("insert into audio_characters (id, name, model, sample_path, sample_asset_id, prompt_text, origin, save_to_library, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.name, record.model, record.samplePath, record.sampleAssetId, record.promptText, record.origin, record.saveToLibrary ? 1 : 0, record.createdAt, record.jobId, record.status, record.error]);
   const tid = outputID();
-  const logPath = taskLogPath(tid);
-  try {
-    const args = ["python/audio_runner.py", "design-character", "--name", name, "--model", model, "--output-relative", stem, "--task-log", logPath];
-    if (presetId) args.push("--preset-id", presetId);
-    else args.push("--design-desc", designDesc);
-    const job = ctx.python.run(args);
-    const meta = { type: "设计声音", model, characterName: name, origin, ...(presetId ? { presetId } : { designDesc: designDesc.slice(0, 40) }), saveToLibrary };
-    const tracked = trackJob(ctx, job, "design", id, { taskId: tid, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), meta });
-    record.jobId = shellJobID(tracked);
-    ctx.sqlite.execute("update audio_characters set job_id = ? where id = ?", [record.jobId, id]);
-    return { job: tracked, taskId: tid, character: { id, origin } };
-  } catch (error) {
-    markFailed(ctx, "design", id, error);
-    throw error;
-  }
+  const meta = { type: "设计声音", model, characterName: name, origin, ...(presetId ? { presetId } : { designDesc: designDesc.slice(0, 40) }), saveToLibrary };
+  submitJob(ctx, { action: "design", recordID: id, payload: { name, model, presetId, designDesc }, meta, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid });
+  pumpQueue(ctx);
+  const row = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, started_at, error from audio_tasks where id = ?", [tid])[0];
+  return { job: jobForTask(ctx, row), taskId: tid, character: { id, origin } };
 }
 
 // design/preset 角色的 saveToLibrary 懒终态：完成且要求入库但还没入库时，幂等补一次
@@ -775,30 +880,19 @@ function synthesize(input, ctx) {
   if (presetId && characterID) throw new Error(tr(ctx, "presetId 与 characterId 互斥，二者不可同时传入。", "presetId and characterId are mutually exclusive."));
   const isVoxCpm = VOXCPM_MODELS.includes(engine);
   if (isVoxCpm && !characterID && !presetId && engine !== "voxcpm2") throw new Error("VoxCPM1.5 / VoxCPM-0.5B use continuation cloning and need a voice character.");
-  ensureNoActiveJob(ctx);
-  const characters = characterID ? ctx.sqlite.query("select id, sample_path, prompt_text from audio_characters where id = ? and status = 'completed'", [characterID]).filter((row) => characterQuality(ctx, row)) : [];
+  pumpQueue(ctx);
+  const characters = characterID ? ctx.sqlite.query("select id, name, sample_path, prompt_text from audio_characters where id = ? and status = 'completed'", [characterID]).filter((row) => characterQuality(ctx, row)) : [];
   if (characterID && !characters.length) throw new Error("Selected voice character was not found.");
-  const character = characters[0] || { id: "__cosyvoice_default__", sample_path: "", prompt_text: "" };
   const id = outputID();
   const outputPath = `syntheses/${id}.wav`;
   const record = { id, characterId: characterID, text, style, engine, outputPath, mimeType: "audio/wav", savedAssetId: "", createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
   ctx.sqlite.execute("insert into audio_syntheses (id, character_id, text, style, engine, output_path, mime_type, saved_asset_id, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.characterId, record.text, record.style, record.engine, record.outputPath, record.mimeType, record.savedAssetId, record.createdAt, record.jobId, record.status, record.error]);
   const tid = outputID();
-  const logPath = taskLogPath(tid);
-  try {
-    const args = ["python/audio_runner.py", "synthesize", "--text", text, "--style", style, "--engine", engine, "--output", outputPath, "--task-log", logPath];
-    if (characterID) args.push("--reference", character.sample_path, "--prompt-text", character.prompt_text);
-    else if (presetId) args.push("--preset-id", presetId);
-    else args.push("--default-voice");
-    const job = ctx.python.run(args);
-    const tracked = trackJob(ctx, job, "synthesize", id, { taskId: tid, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), meta: { type: "配音合成", engine, characterId: characterID, characterName: character.name, ...(presetId ? { presetId } : {}) } });
-    record.jobId = shellJobID(tracked);
-    ctx.sqlite.execute("update audio_syntheses set job_id = ? where id = ?", [record.jobId, id]);
-    return { job: tracked, taskId: tid, synthesis: { id } };
-  } catch (error) {
-    markFailed(ctx, "synthesize", id, error);
-    throw error;
-  }
+  // 排队重放载荷为解析后的输入（style/engine 已补默认值）；角色参考音在派发时按 characterId 重读（prompt 以当时为准）。
+  submitJob(ctx, { action: "synthesize", recordID: id, payload: { text, style, engine, characterId: characterID, presetId }, meta: { type: "配音合成", engine, characterId: characterID, characterName: characters[0] ? characters[0].name : "", ...(presetId ? { presetId } : {}) }, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid });
+  pumpQueue(ctx);
+  const row = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, started_at, error from audio_tasks where id = ?", [tid])[0];
+  return { job: jobForTask(ctx, row), taskId: tid, synthesis: { id } };
 }
 
 function synthesisRecord(ctx, row) {
@@ -890,18 +984,18 @@ function job(_, ctx) {
 function resolveJob(input, ctx) {
   ensureSchema(ctx);
   const id = value(input, "id");
-  const active = trackedJob(ctx);
-  if (!active || active.id !== id) return { id, resolved: false };
-  if (isActiveJob(active.status)) throw new Error("Audio task is still running.");
-  ctx.sqlite.execute("update audio_jobs set resolved_at = ? where job_id = ?", [new Date().toISOString(), id]);
+  if (!id) return { id, resolved: false };
+  const rows = ctx.sqlite.query("select id from audio_tasks where shell_job_id = ?", [id]);
+  if (!rows.length) return { id, resolved: false };
+  // 队列时代结算统一由 pumpQueue 负责；resolve 仅作「UI 停止跟踪」信号（幂等）。
   return { id, resolved: true };
 }
 
 function cancel(_, ctx) {
-  const active = trackedJob(ctx);
-  if (!active || !isActiveJob(active.status)) return { cancelled: false };
-  ctx.shell.cancel(active.id);
-  return { cancelled: true, id: active.id };
+  pumpQueue(ctx);
+  const rows = ctx.sqlite.query("select id, shell_job_id, action, record_id, state from audio_tasks where state in ('queued','running') order by created_at desc limit 1");
+  if (!rows.length) return { cancelled: false };
+  return cancelTaskRow(ctx, rows[0]);
 }
 
 function tasksList(input, ctx) { return listTasks(ctx, input || {}); }
@@ -912,16 +1006,17 @@ function taskLogs(input, ctx) { return readTaskLogs(ctx, input); }
 
 function taskCancel(input, ctx) {
   ensureSchema(ctx);
+  pumpQueue(ctx);
   const id = value(input, "id");
-  const rows = ctx.sqlite.query("select shell_job_id, state from audio_tasks where id = ?", [id]);
+  const rows = ctx.sqlite.query("select id, shell_job_id, action, record_id, state from audio_tasks where id = ?", [id]);
   if (!rows.length) return { cancelled: false };
   if (!isActiveJob(rows[0].state)) return { cancelled: false };
-  ctx.shell.cancel(rows[0].shell_job_id);
-  return { cancelled: true, id };
+  return cancelTaskRow(ctx, rows[0]);
 }
 
 recut.operation.register("audio.status", status);
 recut.operation.register("audio.prepare", prepare);
+recut.operation.register("audio.settings.set", settingsSet);
 recut.operation.register("audio.install", install);
 recut.operation.register("audio.transcribe", transcribe);
 recut.operation.register("audio.transcripts", transcripts);
