@@ -25,6 +25,24 @@
       "bootstrap": "bootstrap.py"
     }
   },
+  "distribution": {
+    "builtin": {
+      "include": ["."],
+      "exclude": [
+        "rfc",
+        "publish",
+        "__pycache__",
+        "**/__pycache__",
+        "ui/node_modules",
+        "ui/src",
+        "ui/package-lock.json",
+        "ui/package.json",
+        "ui/tsconfig.json",
+        "ui/vite.config.ts",
+        "ui/components.json"
+      ]
+    }
+  },
   "operations": [
     {
       "name": "audio.status",
