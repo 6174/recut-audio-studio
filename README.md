@@ -38,6 +38,10 @@ Recut 的本地声音工作台 — 转写、声音角色与配音在同一条工
 
 默认 **CosyVoice2**（官方默认声音或声纹克隆），可选 **VoxCPM**（VoxCPM2 约 5.0GB / VoxCPM1.5 约 2.0GB / VoxCPM-0.5B 约 1.6GB）：VoxCPM2 支持 30 语种与 Voice Design 默认音，VoxCPM1.5/0.5B 需提供角色参考音。
 
+### 默认声音与声音设计
+
+内置 20 个中文风格预设声音（`audio.presets` 枚举，参考音托管在 CDN、首次使用按需下载缓存，离线回退内置清单）；也可以用一段中文描述（年龄/性别 + 音色质地 + 语速节奏 + 参照场景）经 VoxCPM2 Voice Design（`audio.character.design`）直接设计一个声音角色，或从预设一键另存为私有角色。
+
 ### 与剪辑器字幕工作流打通
 
 转写保存为平台 `transcript` 素材（源声音 + SRT + JSON bundle），剪辑器经能力桥（`audio.transcribe` / `audio.save`）一键生成字幕轨并绑定可编辑文稿。
@@ -46,7 +50,7 @@ Recut 的本地声音工作台 — 转写、声音角色与配音在同一条工
 
 1. **准备环境**：首次打开自动准备依赖；或按需下载模型（Hugging Face / ModelScope / 自动回退）。
 2. **转写**：选择素材库中的音频或视频、模型与语言，生成文稿与 SRT，满意后保存为 transcript 素材。
-3. **创建声音角色**：选择一段人声素材命名并创建，系统自动预处理与验收。
+3. **创建声音角色**：选择一段人声素材命名并创建，系统自动预处理与验收；也可以从 20 个内置预设选一个，或用一段中文描述设计声音（`audio.character.design`）。
 4. **配音**：输入文本，选择引擎与角色（可选），试听私有预览后保存为音频素材。
 5. **回到剪辑器**：在时间线上使用字幕与配音素材继续编排与导出。
 
@@ -56,6 +60,8 @@ Recut 的本地声音工作台 — 转写、声音角色与配音在同一条工
 | --- | --- | --- |
 | **本地转写** | 音/视频转带时间戳文稿与 SRT，支持中/英/自动 | `audio.transcribe` · `audio.transcript` · `audio.transcripts` |
 | **声音角色** | 从参考音创建可复用角色，自动验收声纹与回读 | `audio.character.create` · `audio.characters` · `audio.character.remove` |
+| **默认声音** | 20 个中文风格预设，CDN 按需获取 | `audio.presets` |
+| **声音设计** | 用一段中文描述（VoxCPM2 Voice Design）或预设直接创建声音角色 | `audio.character.design` |
 | **配音合成** | 用默认声音或角色朗读新文本，支持 CosyVoice2 / VoxCPM 三档 | `audio.synthesize` · `audio.syntheses` |
 | **保存入库** | 将私有文稿/配音/角色参考音保存为素材库 Asset | `audio.save` |
 | **环境与模型** | 检查 Python/FFmpeg/模型与引擎就绪状态，按需安装 | `audio.status` · `audio.prepare` · `audio.install` |
@@ -83,7 +89,7 @@ Agent 会经能力桥调用转写与保存，结果回到素材库与时间线�
 
 - **模型管理**：选择并下载 Whisper / Qwen3-ASR / CosyVoice2 / VoxCPM 权重，切换下载源。
 - **转写**：选择素材与语言，查看分段文稿与 SRT 预览，保存为 transcript 素材。
-- **声音角色**：从素材库选择参考音、命名创建，查看验收结果与角色列表。
+- **声音角色**：从素材库选择参考音、命名创建，或在「预设」页签选内置声音、用「设计声音」弹框以描述创建；查看验收结果与角色列表。
 - **配音**：输入文本、选择引擎与角色，试听并保存。
 - **任务与日志**：查看当前与历史任务状态，打开持久化日志，取消运行中任务。
 

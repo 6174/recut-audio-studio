@@ -16,7 +16,9 @@ import sys
 from pathlib import Path
 
 # VoxCPM 的 Voice Design 默认音描述：VoxCPM2 用它生成无需参考音的中性人声。
+# 仅作 --design-desc 缺省值，预设走显式参数。
 VOXCPM_DESIGN_DESC = "一位年轻、温和的中文女声，语气自然亲切"
+DEFAULT_SEED = 42
 MIN_TORCH_VERSION = (2, 5, 0)
 
 
@@ -82,7 +84,7 @@ def load_engine(model_dir: Path):
     return engine
 
 
-def synthesize(version: str, model_dir: Path, reference: Path | None, prompt_text: str, text: str, output: Path, voice_design: bool = False) -> None:
+def synthesize(version: str, model_dir: Path, reference: Path | None, prompt_text: str, text: str, output: Path, voice_design: bool = False, design_desc: str = VOXCPM_DESIGN_DESC, seed: int = DEFAULT_SEED) -> None:
     import numpy as np
     import soundfile as sf
 
@@ -97,6 +99,10 @@ def synthesize(version: str, model_dir: Path, reference: Path | None, prompt_tex
         emit({"ready": False, "error": "VoxCPM 该版本需要声音角色参考音；仅 VoxCPM2 支持 Voice Design 默认音。"}, 1)
 
     engine = load_engine(model_dir)
+    # voxcpm 2.0.3 的 generate() 不暴露 seed；用进程级 manual_seed 保证探针可复现。
+    import torch
+
+    torch.manual_seed(seed)
     kwargs = {"text": text, "cfg_value": 2.0, "inference_timesteps": 10}
     if reference is not None:
         if is_v2:
@@ -108,7 +114,7 @@ def synthesize(version: str, model_dir: Path, reference: Path | None, prompt_tex
             kwargs["prompt_text"] = prompt_text
     else:
         # VoxCPM2 Voice Design：用自然语言描述直接设计音色，无需参考音。
-        kwargs["text"] = f"({VOXCPM_DESIGN_DESC}){text}"
+        kwargs["text"] = f"({design_desc}){text}"
 
     print(f"[audio] VoxCPM worker：开始推理，共 {len(kwargs['text'])} 个文本字符。", flush=True)
     wav = engine.generate(**kwargs)
@@ -133,6 +139,8 @@ def main() -> None:
     synthesize_parser.add_argument("--reference", default="")
     synthesize_parser.add_argument("--prompt-text", default="")
     synthesize_parser.add_argument("--voice-design", action="store_true")
+    synthesize_parser.add_argument("--design-desc", default=VOXCPM_DESIGN_DESC)
+    synthesize_parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     synthesize_parser.add_argument("--text", required=True)
     synthesize_parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -141,7 +149,7 @@ def main() -> None:
             result = runtime_status()
             emit(result, 0 if result["ready"] else 1)
         reference = Path(args.reference) if args.reference else None
-        synthesize(args.version, Path(args.model_dir), reference, args.prompt_text, args.text, Path(args.output), args.voice_design)
+        synthesize(args.version, Path(args.model_dir), reference, args.prompt_text, args.text, Path(args.output), args.voice_design, args.design_desc, args.seed)
     except SystemExit:
         raise
     except Exception as error:

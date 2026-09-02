@@ -1,12 +1,12 @@
 /**
  * [INPUT]: 依赖 Recut SDK、声音工坊 operation、平台素材选择器、素材库上传 HTTP、shadcn/ui 组件与 React 状态
- * [OUTPUT]: 对外提供三步声音工作流导航、会话级配音草稿、Download Source、Whisper/Qwen/CosyVoice 模型下载、转写文稿与 SRT、转写保存为素材库 bundle、声音角色创建/试听/删除、角色配音合成与试听，以及历史小卡片点击后在共享详情预览中操作、实时计时/日志、任务停止和用户确认入库工作台
- * [POS]: audio-studio UI 编排层；仅在环境和选定模型就绪后开放推理，生成结果先留在 App 私有文件区；UI 用户可见文案经 i18n.ts 随 locale 切换
+ * [OUTPUT]: 对外提供三步声音工作流导航、会话级配音草稿、Download Source、Whisper/Qwen/CosyVoice 模型下载、转写文稿与 SRT、转写保存为素材库 bundle、声音角色创建/试听/删除、预设声音选择（选中即后台经 audio.preset.prepare 按 CDN 下载缓存，试听就绪后直接播放）与配音合成与试听，以及任务中心的状态筛选、停止、日志和显式入库工作台
+ * [POS]: audio-studio UI 编排层；入口卡片负责启动工作流，左侧任务中心负责选择与筛选，右侧详情负责日志和结果；仅在环境和选定模型就绪后开放推理，生成结果先留在 App 私有文件区；UI 用户可见文案经 i18n.ts 随 locale 切换
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 import { createRoot } from "react-dom/client";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, CircleStop, Clock3, Copy, Download, FileAudio, FolderOpen, LoaderCircle, MessageSquareText, Mic, Save, Send, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { ArrowRight, AudioWaveform, Check, ChevronRight, CircleStop, Clock3, Copy, Download, FileAudio, Filter, FolderOpen, LoaderCircle, MessageSquareText, Mic, Save, Send, Sparkles, Trash2, Upload, Wand2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,7 +18,8 @@ import { cn } from "@/lib/utils";
 import { recut, useRecutLocale, type Locale } from "./recut-sdk";
 import type { TaskAction, TaskListResult, TaskLogEntry, TaskLogResult, TaskState, TaskSummary } from "./types";
 import { t, tF, type I18nKey } from "./i18n";
-import type { ActiveAudioJob, DownloadSource, Language, MediaAsset, RuntimeStatus, ShellJob, ShellJobLog, SpeechModel, Synthesis, TranscriptDetail, TranscriptSegment, TranscriptSummary, TtsEngine, VoiceCharacter, VoiceStyle, VoxCpmEngineStatus, VoxCpmVersion } from "./types";
+import type { ActiveAudioJob, DesignCharacterResult, DownloadSource, Language, MediaAsset, PresetsResult, RuntimeStatus, ShellJob, ShellJobLog, SpeechModel, Synthesis, TranscriptDetail, TranscriptSegment, TranscriptSummary, TtsEngine, VoiceCharacter, VoicePreset, VoiceStyle, VoxCpmEngineStatus, VoxCpmVersion } from "./types";
+import { DesignVoiceDialog, VoicePicker } from "./voice";
 import "./index.css";
 
 type Tab = "transcribe" | "characters" | "synthesize";
@@ -68,7 +69,7 @@ function engineLabel(locale: Locale, engine: string): string {
 }
 
 type ActiveJob = { id: string; action: ActiveAudioJob["action"]; recordID?: string; startedAt: number; status: ShellJob["status"]; error?: string };
-type SynthesisDraft = { text: string; characterId: string; style: VoiceStyle; engine: EngineFamily; voxcpmVersion: VoxCpmVersion };
+type SynthesisDraft = { text: string; characterId: string; presetId: string; style: VoiceStyle; engine: EngineFamily; voxcpmVersion: VoxCpmVersion };
 
 const synthesisDraftStorageKey = "recut.audio-studio.synthesis-draft.v1";
 
@@ -78,11 +79,12 @@ function readSynthesisDraft(): SynthesisDraft {
     return {
       text: typeof draft.text === "string" ? draft.text : "",
       characterId: typeof draft.characterId === "string" ? draft.characterId : "",
+      presetId: typeof draft.presetId === "string" ? draft.presetId : "",
       style: draft.style && styles.some((item) => item.id === draft.style) ? draft.style : "neutral",
       engine: draft.engine && engines.some((item) => item.id === draft.engine) ? draft.engine : "cosyvoice2",
       voxcpmVersion: draft.voxcpmVersion && voxcpmVersions.some((item) => item.id === draft.voxcpmVersion) ? draft.voxcpmVersion : "voxcpm2",
     };
-  } catch (_) { return { text: "", characterId: "", style: "neutral", engine: "cosyvoice2", voxcpmVersion: "voxcpm2" }; }
+  } catch (_) { return { text: "", characterId: "", presetId: "", style: "neutral", engine: "cosyvoice2", voxcpmVersion: "voxcpm2" }; }
 }
 
 function saveSynthesisDraft(draft: SynthesisDraft) {
@@ -91,7 +93,7 @@ function saveSynthesisDraft(draft: SynthesisDraft) {
 }
 
 function isTerminal(status: ShellJob["status"]) { return status !== "queued" && status !== "running"; }
-function isValidActiveJob(job: ActiveAudioJob | null | undefined): job is ActiveAudioJob { return Boolean(job?.id && ["prepare", "install", "transcribe", "character", "synthesize"].includes(job.action) && ["queued", "running", "completed", "failed", "cancelled", "interrupted"].includes(job.status)); }
+function isValidActiveJob(job: ActiveAudioJob | null | undefined): job is ActiveAudioJob { return Boolean(job?.id && ["prepare", "install", "transcribe", "character", "design", "synthesize"].includes(job.action) && ["queued", "running", "completed", "failed", "cancelled", "interrupted"].includes(job.status)); }
 function logText(logs: ShellJobLog[]) { return logs.map((entry) => entry.text).join(""); }
 function mergeLogs(current: ShellJobLog[], next: ShellJobLog[]) { return [...new Map([...current, ...next].map((entry) => [entry.sequence, entry])).values()].sort((left, right) => left.sequence - right.sequence).slice(-80); }
 function jobStartedAt(startedAt?: string) { const value = Date.parse(startedAt || ""); return Number.isNaN(value) ? Date.now() : value; }
@@ -125,6 +127,14 @@ function App() {
   const [characterAsset, setCharacterAsset] = useState<MediaAsset | null>(null);
   const [synthesisText, setSynthesisText] = useState(initialSynthesisDraft.text);
   const [synthesisCharacterId, setSynthesisCharacterId] = useState(initialSynthesisDraft.characterId);
+  const [synthesisPresetId, setSynthesisPresetId] = useState(initialSynthesisDraft.presetId);
+  const [presets, setPresets] = useState<VoicePreset[]>([]);
+  const [presetsError, setPresetsError] = useState("");
+  const [preparingPresetId, setPreparingPresetId] = useState("");
+  const [playingPresetId, setPlayingPresetId] = useState("");
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const preparedPresetURLs = useRef(new Map<string, string>());
+  const [designOpen, setDesignOpen] = useState(false);
   const [style, setStyle] = useState<VoiceStyle>(initialSynthesisDraft.style);
   const [engine, setEngine] = useState<EngineFamily>(initialSynthesisDraft.engine);
   const [voxcpmVersion, setVoxcpmVersion] = useState<VoxCpmVersion>(initialSynthesisDraft.voxcpmVersion);
@@ -138,7 +148,7 @@ function App() {
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskSummary | null>(null);
   const [taskLogs, setTaskLogs] = useState<TaskLogEntry[]>([]);
-  const [taskFilter, setTaskFilter] = useState<"all" | "running" | "ai" | "manual">("all");
+  const [taskFilter, setTaskFilter] = useState<"all" | "running" | "completed" | "failed">("all");
   const [launcherOpen, setLauncherOpen] = useState<Tab | null>(null);
   const [workflowStep, setWorkflowStep] = useState(0);
   const [charactersView, setCharactersView] = useState<"create" | "list" | "detail">("create");
@@ -148,11 +158,10 @@ function App() {
   const logsRef = useRef<ShellJobLog[]>([]);
   const showLogsForNewJob = useCallback(() => {}, []);
 
-  const loadTasks = useCallback(async (filter: "all" | "running" | "ai" | "manual") => {
+  const loadTasks = useCallback(async (filter: "all" | "running" | "completed" | "failed") => {
     try {
       const result = await recut.background.call("audio.tasks.list", {
-        ...(filter === "ai" ? { source: "ai" } : filter === "manual" ? { source: "manual" } : {}),
-        ...(filter === "running" ? { status: "running" } : {}),
+        ...(filter === "running" ? { status: "running" } : filter === "completed" ? { status: "done" } : filter === "failed" ? { status: "failed" } : {}),
         limit: 100,
       }) as TaskListResult;
       setTasks(result.tasks);
@@ -170,7 +179,7 @@ function App() {
       if (task.action === "transcribe") {
         const detail = await recut.background.call("audio.transcript", { id: task.recordId }) as TranscriptDetail;
         setTaskResult(detail && Array.isArray(detail.segments) ? { kind: "transcript", item: detail } : null);
-      } else if (task.action === "character") {
+      } else if (task.action === "character" || task.action === "design") {
         const character = characters.find((item) => item.id === task.recordId);
         setTaskResult(character ? { kind: "character", item: character } : null);
       } else if (task.action === "synthesize") {
@@ -226,7 +235,58 @@ function App() {
   }, [restoreJob]);
 
   useEffect(() => { logsRef.current = logs; }, [logs]);
-  useEffect(() => { saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, style, engine, voxcpmVersion }); }, [engine, style, synthesisCharacterId, synthesisText, voxcpmVersion]);
+  useEffect(() => { saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, presetId: synthesisPresetId, style, engine, voxcpmVersion }); }, [engine, style, synthesisCharacterId, synthesisPresetId, synthesisText, voxcpmVersion]);
+  // 预设清单：进入工作台后拉取一次 audio.presets（只读 op）；失败仅在预设页签内提示，不阻塞工作台。
+  useEffect(() => {
+    if (!status?.ready || presets.length) return;
+    void (async () => {
+      try {
+        const result = await recut.background.call("audio.presets", {}) as PresetsResult;
+        setPresets(Array.isArray(result?.presets) ? result.presets : []); setPresetsError("");
+      } catch (error) { setPresetsError(error instanceof Error ? error.message : t(locale, "preset.loadFailed")); }
+    })();
+  }, [status?.ready, presets.length, locale]);
+  // 预设试听：后台按需准备参考音（缓存查 → CDN 下载 + sha256 校验），完成后直接播放私有预览地址；
+  // 再次点击同一预设可暂停/继续；选中也静默触发一次，提前把所选预设下载到本地缓存。
+  const playPreset = useCallback((presetId: string, url: string) => {
+    const current = previewAudioRef.current;
+    if (current && playingPresetId === presetId) {
+      if (current.paused) { void current.play().catch(() => {}); setPlayingPresetId(presetId); }
+      else { current.pause(); setPlayingPresetId(""); }
+      return;
+    }
+    current?.pause();
+    const audio = new Audio(url);
+    audio.onended = () => setPlayingPresetId((id) => (id === presetId ? "" : id));
+    previewAudioRef.current = audio;
+    void audio.play().catch(() => {});
+    setPlayingPresetId(presetId);
+  }, [playingPresetId]);
+  const preparePreset = useCallback(async (presetId: string, announce: boolean) => {
+    if (!presetId) return;
+    if (announce) {
+      const current = previewAudioRef.current;
+      if (current && playingPresetId === presetId) {
+        if (current.paused) { void current.play().catch(() => {}); setPlayingPresetId(presetId); }
+        else { current.pause(); setPlayingPresetId(""); }
+        return;
+      }
+      // 已就绪过的预设直接复用 preview 地址，不再走后台 op。
+      const ready = preparedPresetURLs.current.get(presetId);
+      if (ready) { playPreset(presetId, ready); return; }
+      if (preparingPresetId) return;
+      setPreparingPresetId(presetId);
+    }
+    try {
+      const result = await recut.background.call("audio.preset.prepare", { presetId }) as { previewURL: string };
+      preparedPresetURLs.current.set(presetId, result.previewURL);
+      if (announce) playPreset(presetId, result.previewURL);
+    } catch (error) {
+      if (announce) setMessage(tF(locale, "preset.prepareFailed", { error: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      if (announce) setPreparingPresetId("");
+    }
+  }, [locale, playPreset, playingPresetId, preparingPresetId]);
   useEffect(() => { window.addEventListener("recut-sdk-ready", refresh); void refresh(); return () => window.removeEventListener("recut-sdk-ready", refresh); }, [refresh]);
   useEffect(() => { void loadAssets().catch((error) => setMessage(error.message)); }, [loadAssets]);
   useEffect(() => { if (isValidActiveJob(status?.activeJob)) restoreJob(status.activeJob); }, [restoreJob, status?.activeJob]);
@@ -280,9 +340,9 @@ function App() {
       } else if (job.action === "transcribe" && job.recordID) {
         await recut.background.call("audio.transcript", { id: job.recordID });
         setMessage(t(locale, "msg.transcribeDone"));
-      } else if (job.action === "character" && job.recordID) {
+      } else if ((job.action === "character" || job.action === "design") && job.recordID) {
         await recut.background.call("audio.character.complete", { id: job.recordID });
-        setMessage(t(locale, "msg.characterCreated"));
+        setMessage(t(locale, job.action === "design" ? "msg.designDone" : "msg.characterCreated"));
       } else if (job.action === "synthesize" && job.recordID) {
         await recut.background.call("audio.synthesis.complete", { id: job.recordID });
         setMessage(t(locale, "msg.synthesisDone"));
@@ -384,13 +444,25 @@ function App() {
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.characterFailed")); setBusy(null); }
   };
 
+  const designCharacter = async (input: { name: string; designDesc?: string; presetId?: string; saveToLibrary: boolean }) => {
+    setBusy("character"); setFailure(""); showLogsForNewJob(); setLogs([]);
+    setMessage(t(locale, "msg.designing"));
+    try {
+      const result = await recut.background.call("audio.character.design", { name: input.name, ...(input.designDesc ? { designDesc: input.designDesc } : {}), ...(input.presetId ? { presetId: input.presetId } : {}), saveToLibrary: input.saveToLibrary, model }) as DesignCharacterResult;
+      beginJob(result.job, "design", result.character.id);
+      focusNewTask(result.taskId, "design", result.character.id, { type: "设计声音", model, characterName: input.name, ...(input.presetId ? { presetId: input.presetId } : {}), ...(input.designDesc ? { designDesc: input.designDesc.slice(0, 60) } : {}) });
+      setDesignOpen(false);
+    } catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.designFailed")); setBusy(null); }
+  };
+
   const synthesizeVoice = async () => {
     if (!synthesisText.trim()) return setMessage(t(locale, "msg.enterText"));
-    if (engineNeedsCharacter && !synthesisCharacterId) return setMessage(t(locale, "msg.pickReferenceForVoxCpm"));
-    saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, style, engine, voxcpmVersion });
+    if (engineNeedsCharacter && !synthesisCharacterId && !synthesisPresetId) return setMessage(t(locale, "msg.pickReferenceForVoxCpm"));
+    saveSynthesisDraft({ text: synthesisText, characterId: synthesisCharacterId, presetId: synthesisPresetId, style, engine, voxcpmVersion });
     setBusy("synthesize"); setFailure(""); showLogsForNewJob(); setLogs([]);
     setMessage(t(locale, "msg.synthesizing"));
-    try { const result = await recut.background.call("audio.synthesize", { ...(synthesisCharacterId ? { characterId: synthesisCharacterId } : {}), text: synthesisText, style, engine: effectiveEngine }) as { job: ShellJob; taskId: string; synthesis: { id: string } }; beginJob(result.job, "synthesize", result.synthesis.id); focusNewTask(result.taskId, "synthesize", result.synthesis.id, { type: "配音合成", engine: effectiveEngine, characterId: synthesisCharacterId }); }
+    // presetId 与 characterId 互斥：选中预设时只提交 presetId（未缓存的由后端在提交时自动 resolve 下载）。
+    try { const result = await recut.background.call("audio.synthesize", { ...(synthesisPresetId ? { presetId: synthesisPresetId } : synthesisCharacterId ? { characterId: synthesisCharacterId } : {}), text: synthesisText, style, engine: effectiveEngine }) as { job: ShellJob; taskId: string; synthesis: { id: string } }; beginJob(result.job, "synthesize", result.synthesis.id); focusNewTask(result.taskId, "synthesize", result.synthesis.id, { type: "配音合成", engine: effectiveEngine, characterId: synthesisCharacterId, ...(synthesisPresetId ? { presetId: synthesisPresetId } : {}) }); }
     catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.synthesisFailed")); setBusy(null); }
   };
 
@@ -474,17 +546,22 @@ function App() {
   const nav = { step: workflowStep, onBack: () => setWorkflowStep((current) => Math.max(0, current - 1)), onNext: () => setWorkflowStep((current) => current + 1) };
   const controls = <div className="flex flex-col gap-6">
     {tab === "transcribe" && <TranscribeControls {...nav} busy={busy} downloadSource={downloadSource} language={language} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setLanguage={setLanguage} setModel={setModel} sourceAsset={sourceAsset} upload={(file) => void upload(file, "source")} onChoose={() => void chooseSource(["audio", "video"])} onRun={() => void transcribeSource()} onInstall={() => void installSpeechModel()} />}
-    {tab === "characters" && <CharacterControls {...nav} busy={busy} characterAsset={characterAsset} characterName={characterName} downloadSource={downloadSource} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setCharacterName={setCharacterName} setModel={setModel} upload={(file) => void upload(file, "character")} onChoose={() => void chooseCharacterSource()} onRun={() => void createCharacter()} onInstall={() => void installSpeechModel()} />}
-    {tab === "synthesize" && <SynthesizeControls {...nav} busy={busy} characters={characters} downloadSource={downloadSource} engine={engine} engineNeedsCharacter={engineNeedsCharacter} engineReady={engineReady} setDownloadSource={setDownloadSource} setEngine={setEngine} setSynthesisCharacterId={setSynthesisCharacterId} setSynthesisText={setSynthesisText} setStyle={setStyle} setVoxcpmVersion={setVoxcpmVersion} style={style} synthesisCharacterId={synthesisCharacterId} synthesisText={synthesisText} voxcpmEngine={voxcpmEngine} voxcpmVersion={voxcpmVersion} onInstall={() => void installCosyVoice()} onInstallVoxCpm={(version) => void installVoxCpm(version)} onRetryVoxCpmRuntime={() => void retryVoxCpmRuntime()} onRun={() => void synthesizeVoice()} />}
+    {tab === "characters" && <CharacterControls {...nav} busy={busy} characterAsset={characterAsset} characterName={characterName} downloadSource={downloadSource} model={model} readySpeechModel={readySpeechModel} setDownloadSource={setDownloadSource} setCharacterName={setCharacterName} setModel={setModel} upload={(file) => void upload(file, "character")} onChoose={() => void chooseCharacterSource()} onRun={() => void createCharacter()} onInstall={() => void installSpeechModel()} onDesignVoice={() => setDesignOpen(true)} />}
+    {tab === "synthesize" && <SynthesizeControls {...nav} busy={busy} characters={characters} playingPresetId={playingPresetId} preparingPresetId={preparingPresetId} presets={presets} presetsError={presetsError} downloadSource={downloadSource} engine={engine} engineNeedsCharacter={engineNeedsCharacter} engineReady={engineReady} setDownloadSource={setDownloadSource} setEngine={setEngine} setSynthesisCharacterId={setSynthesisCharacterId} setSynthesisPresetId={setSynthesisPresetId} setSynthesisText={setSynthesisText} setStyle={setStyle} setVoxcpmVersion={setVoxcpmVersion} style={style} synthesisCharacterId={synthesisCharacterId} synthesisPresetId={synthesisPresetId} synthesisText={synthesisText} voxcpmEngine={voxcpmEngine} voxcpmVersion={voxcpmVersion} onInstall={() => void installCosyVoice()} onInstallVoxCpm={(version) => void installVoxCpm(version)} onRetryVoxCpmRuntime={() => void retryVoxCpmRuntime()} onPreparePreset={(presetId, announce) => void preparePreset(presetId, announce)} onRun={() => void synthesizeVoice()} />}
   </div>;
 
-  return <div className="mx-auto flex h-dvh w-full max-w-[1440px] flex-col overflow-hidden p-6">
-    <header className="flex shrink-0 flex-col gap-0.5 border-b pb-4">
-      <h1 className="text-xl font-semibold tracking-tight">{t(locale, "app.title")}</h1>
-      <p className="text-sm text-muted-foreground">{t(locale, "app.subtitle")}</p>
+  return <div className="mx-auto flex h-dvh w-full max-w-[1440px] flex-col overflow-hidden bg-background p-4 sm:p-6">
+    <header className="flex shrink-0 items-center justify-between gap-4 px-1 py-1 sm:py-2">
+      <div className="flex min-w-0 items-center gap-3">
+        <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-primary text-primary-foreground shadow-[0_8px_24px_rgba(34,197,94,0.16)]"><AudioWaveform className="size-5" /></span>
+        <div className="min-w-0">
+          <h1 className="text-base font-bold tracking-tight">{t(locale, "app.title")} <span className="font-normal text-muted-foreground">v1.0</span></h1>
+          <p className="max-w-2xl truncate text-xs text-muted-foreground">{t(locale, "app.subtitle")}</p>
+        </div>
+      </div>
     </header>
-    <LauncherBar onLaunch={(next) => { setTab(next); setLauncherOpen(next); setWorkflowStep(0); if (next === "characters") { setCharactersView("create"); setViewCharacter(null); } }} running={running} />
-    <main className="mt-4 grid min-h-0 flex-1 items-stretch gap-4 min-[900px]:grid-cols-[minmax(320px,420px)_minmax(0,1fr)]">
+    <LauncherBar active={tab} onLaunch={(next) => { setTab(next); setLauncherOpen(next); setWorkflowStep(0); if (next === "characters") { setCharactersView("create"); setViewCharacter(null); } }} running={running} />
+    <main className="mt-4 grid min-h-0 flex-1 items-stretch gap-4 min-[900px]:grid-cols-[minmax(340px,420px)_minmax(0,1fr)]">
       <TaskCenter tasks={tasks} filter={taskFilter} selectedTask={selectedTask} onCancelTask={(id) => void cancelTaskById(id)} onFilter={setTaskFilter} onSelect={(task) => { void selectTask(task, characters, syntheses); }} />
       <TaskDetail busy={busy} logs={taskLogs} selectedTask={selectedTask} result={taskResult} onEditSegment={updateSegmentText} onSaveCharacter={(character) => void saveCharacter(character)} onSaveSynthesis={(synthesis) => void saveSynthesis(synthesis)} onSaveTranscript={(transcript) => void saveTranscript(transcript)} />
     </main>
@@ -497,17 +574,18 @@ function App() {
     ) : launcherOpen ? (
       <DialogCard title={t(locale, launcherOpen === "transcribe" ? "nav.transcribe.label" : "nav.synthesize.label")} onClose={() => setLauncherOpen(null)}>{controls}</DialogCard>
     ) : null}
+    <DesignVoiceDialog busy={busy} onClose={() => setDesignOpen(false)} onSubmit={(input) => void designCharacter(input)} open={designOpen} presets={presets} />
   </div>;
 }
 
 function DialogCard({ title, onClose, children, headerAction }: { title: string; onClose: () => void; children: ReactNode; headerAction?: ReactNode }) {
-  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4" onClick={onClose}>
-    <div className="w-full max-w-2xl overflow-hidden rounded-xl border bg-card shadow-xl" onClick={(event) => event.stopPropagation()}>
-      <div className="flex items-center justify-between gap-2 border-b px-5 py-3.5">
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-[2px]" onClick={onClose}>
+    <div className="flex max-h-[min(760px,calc(100dvh-32px))] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border/70 bg-card shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/70 px-5 py-4">
         <h2 className="text-sm font-semibold">{title}</h2>
         <div className="flex items-center gap-2">{headerAction}<Button aria-label="close" onClick={onClose} type="button" variant="ghost" size="icon"><X className="size-4" /></Button></div>
       </div>
-      <div className="p-5">{children}</div>
+      <div className="min-h-0 overflow-y-auto p-5">{children}</div>
     </div>
   </div>;
 }
@@ -519,24 +597,26 @@ function CharList({ characters, onOpen }: { characters: VoiceCharacter[]; onOpen
   </div>;
 }
 
-function LauncherBar({ onLaunch, running }: { onLaunch: (tab: Tab) => void; running: boolean }) {
+function LauncherBar({ active, onLaunch, running }: { active: Tab; onLaunch: (tab: Tab) => void; running: boolean }) {
   const locale = useRecutLocale();
-  const launchers: { id: Tab; icon: ReactNode; labelKey: I18nKey; noteKey: I18nKey; primary: boolean }[] = [
-    { id: "transcribe", icon: <MessageSquareText className="size-6" />, labelKey: "nav.transcribe.label", noteKey: "nav.transcribe.note", primary: true },
-    { id: "characters", icon: <Mic className="size-6" />, labelKey: "nav.characters.label", noteKey: "nav.characters.note", primary: false },
-    { id: "synthesize", icon: <Sparkles className="size-6" />, labelKey: "nav.synthesize.label", noteKey: "nav.synthesize.note", primary: false },
+  const cards: { id: Tab; icon: ReactNode; title: string; subtitle: string; desc: string }[] = [
+    { id: "transcribe", icon: <MessageSquareText className="size-5" />, title: t(locale, "nav.transcribe.label"), subtitle: "音视频 → 文稿与字幕", desc: "支持多种格式转写，智能说话人分离" },
+    { id: "characters", icon: <Mic className="size-5" />, title: t(locale, "nav.characters.label"), subtitle: "参考音 → 专属声纹", desc: "上传参考音频，克隆你的专属声音" },
+    { id: "synthesize", icon: <Sparkles className="size-5" />, title: t(locale, "nav.synthesize.label"), subtitle: "文本 → 声音演绎", desc: "选择角色，输入文本，一键生成配音" },
   ];
-  return <div className="mt-4 flex shrink-0 items-center gap-3 border-b pb-5">
-    {launchers.map((item) => (
-      <button className={cn("group flex min-w-0 flex-1 items-center gap-3 rounded-lg border px-4 py-4 text-left transition-colors hover:border-ring", item.primary ? "border-primary/60 bg-accent/50 hover:bg-accent/70" : "bg-card hover:bg-muted")} key={item.id} onClick={() => onLaunch(item.id)} type="button">
-        <span className={cn("grid size-12 shrink-0 place-items-center rounded-lg", item.primary ? "bg-primary text-primary-foreground" : "bg-muted text-foreground")}>{item.icon}</span>
-        <span className="grid min-w-0 gap-1">
-          <span className="truncate text-base font-semibold">{t(locale, item.labelKey)}</span>
-          <span className="truncate text-xs text-muted-foreground">{t(locale, item.noteKey)}</span>
+  return <div className="mt-2 grid shrink-0 grid-cols-1 gap-3 min-[640px]:grid-cols-3">
+    {cards.map((item) => {
+      const selected = active === item.id;
+      return <button aria-pressed={selected} className={cn("group flex min-h-28 items-center gap-3 rounded-2xl border p-3 text-left shadow-none transition-colors", selected ? "border-primary/60 bg-primary/10" : "border-border/70 bg-card hover:border-border hover:bg-card")} key={item.id} onClick={() => onLaunch(item.id)} type="button">
+        <span className={cn("grid size-12 shrink-0 place-items-center rounded-xl", selected ? "bg-primary text-primary-foreground shadow-[0_8px_24px_rgba(34,197,94,0.16)]" : "bg-muted text-foreground")}>{item.icon}</span>
+        <span className="grid min-w-0 flex-1 gap-1">
+          <span className="flex items-center gap-2 text-sm font-semibold leading-none">{item.title}{selected && running && <span className="flex items-center gap-1 text-[10px] font-normal text-primary"><LoaderCircle className="size-3 animate-spin" />{t(locale, "task.state.running")}</span>}</span>
+          <span className="truncate text-[11px] font-medium leading-none text-foreground/80">{item.subtitle}</span>
+          <span className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">{item.desc}</span>
         </span>
-      </button>
-    ))}
-    <div className="ml-2 shrink-0">{running ? <Badge variant="secondary" className="font-mono"><Clock3 className="size-3.5" />{t(locale, "msg.jobRunning")}</Badge> : null}</div>
+        <span className={cn("grid size-8 shrink-0 place-items-center rounded-full border transition-transform group-hover:translate-x-0.5", selected ? "border-primary bg-primary text-primary-foreground" : "border-border bg-card")}><ArrowRight className="size-3.5" /></span>
+      </button>;
+    })}
   </div>;
 }
 
@@ -549,25 +629,25 @@ function taskStateLabel(locale: Locale, state: TaskState): string {
   return t(locale, "task.state.interrupted");
 }
 
-function TaskCenter({ tasks, filter, selectedTask, onFilter, onSelect, onCancelTask }: { tasks: TaskSummary[]; filter: "all" | "running" | "ai" | "manual"; selectedTask: TaskSummary | null; onFilter: (filter: "all" | "running" | "ai" | "manual") => void; onSelect: (task: TaskSummary) => void; onCancelTask: (id: string) => void }) {
+function TaskCenter({ tasks, filter, selectedTask, onFilter, onSelect, onCancelTask }: { tasks: TaskSummary[]; filter: "all" | "running" | "completed" | "failed"; selectedTask: TaskSummary | null; onFilter: (filter: "all" | "running" | "completed" | "failed") => void; onSelect: (task: TaskSummary) => void; onCancelTask: (id: string) => void }) {
   const locale = useRecutLocale();
   const groups = new Map<string, TaskSummary[]>();
   tasks.forEach((task) => { const date = task.createdAt.slice(0, 10); groups.set(date, [...(groups.get(date) ?? []), task]); });
-  const filters: { id: "all" | "running" | "ai" | "manual"; labelKey: I18nKey }[] = [
-    { id: "all", labelKey: "task.filter.all" },
-    { id: "running", labelKey: "task.filter.running" },
-    { id: "ai", labelKey: "task.filter.ai" },
-    { id: "manual", labelKey: "task.filter.manual" },
+  const filters: { id: "all" | "running" | "completed" | "failed"; label: string }[] = [
+    { id: "all", label: t(locale, "task.filter.all") },
+    { id: "running", label: t(locale, "task.filter.running") },
+    { id: "completed", label: t(locale, "task.state.done") },
+    { id: "failed", label: t(locale, "task.state.failed") },
   ];
-  return <Card className="flex h-full min-h-0 flex-col rounded-lg shadow-none">
-    <div className="flex shrink-0 items-center justify-between gap-2 border-b px-4 py-3">
-      <h2 className="text-sm font-semibold">{t(locale, "task.listTitle")}</h2>
-      <div className="flex gap-1 rounded-md border bg-muted/50 p-1">{filters.map((item) => <Button className={cn(filter === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} key={item.id} onClick={() => onFilter(item.id)} size="sm" type="button" variant="ghost">{t(locale, item.labelKey)}</Button>)}</div>
+  return <Card className="flex h-full min-h-0 flex-col">
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 px-4 py-4">
+      <h2 className="text-base font-semibold">{t(locale, "task.listTitle")}</h2>
+      <div className="flex min-w-0 items-center gap-1 rounded-full bg-muted/60 p-0.5"><Filter className="ml-2 size-3.5 shrink-0 text-muted-foreground" />{filters.map((item) => <Button className={cn("h-7 rounded-full border-0 px-3 text-xs", filter === item.id ? "bg-background text-foreground shadow-xs hover:bg-background" : "bg-transparent text-muted-foreground hover:bg-background/50 hover:text-foreground")} key={item.id} onClick={() => onFilter(item.id)} size="sm" type="button" variant="ghost">{item.label}</Button>)}</div>
     </div>
     <div className="min-h-0 flex-1 overflow-y-auto p-3">
       {tasks.length === 0 && <p className="px-2 py-6 text-center text-xs text-muted-foreground">{t(locale, "task.empty")}</p>}
       {[...groups.entries()].map(([date, items]) => <div key={date}>
-        <p className="px-2 py-1 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">{date}</p>
+        <div className="flex items-center gap-3 px-2 py-2"><span className="shrink-0 font-mono text-[11px] font-medium tracking-wide text-muted-foreground">{date}</span><span className="h-px flex-1 bg-border/70" /></div>
         {items.map((task) => <TaskRow key={task.id} onCancel={onCancelTask} onSelect={onSelect} selected={selectedTask?.id === task.id} task={task} />)}
       </div>)}
     </div>
@@ -578,42 +658,58 @@ function TaskRow({ task, selected, onSelect, onCancel }: { task: TaskSummary; se
   const locale = useRecutLocale();
   const active = task.state === "running" || task.state === "queued";
   const failed = task.state === "failed";
-  return <button className={cn("mb-1 w-full rounded-md border px-3 py-2.5 text-left transition-colors", selected ? "border-primary bg-accent/50" : "border-transparent hover:bg-muted")} onClick={() => onSelect(task)} type="button">
-    <div className="flex items-center gap-2">
-      <span className="grid size-2 shrink-0 place-items-center"><span className={cn("size-2 rounded-full", active ? "bg-primary" : failed ? "bg-destructive" : task.state === "completed" ? "bg-success" : "bg-muted-foreground/50")} /></span>
-      <span className="min-w-0 flex-1 truncate text-sm font-medium">{task.name}</span>
-    </div>
-    <div className="mt-1.5 flex items-center gap-2">
-      <Badge variant="secondary" className={cn("font-mono", task.source === "ai" && "border-primary/40 text-primary")}>{task.source === "ai" ? t(locale, "task.source.ai") : t(locale, "task.source.manual")}</Badge>
-      <span className="text-[11px] text-muted-foreground">{taskStateLabel(locale, task.state)}</span>
-      <span className="flex-1" />
-      {task.submittedBy && <span className="truncate text-[11px] text-muted-foreground">{task.submittedBy}</span>}
-      {active && <Button onClick={(event) => { event.stopPropagation(); onCancel(task.id); }} size="sm" type="button" variant="ghost"><CircleStop className="size-3.5" /></Button>}
-    </div>
-  </button>;
+  const completed = task.state === "completed";
+  const icon = task.action === "install" ? <Download className="size-3.5" /> : task.action === "transcribe" ? <MessageSquareText className="size-3.5" /> : task.action === "character" || task.action === "design" ? <Mic className="size-3.5" /> : <Sparkles className="size-3.5" />;
+  const iconTone = failed ? "bg-destructive/15 text-destructive" : active ? "bg-sky-500/15 text-sky-400" : "bg-primary/15 text-primary";
+  return <div className={cn("mb-2 flex w-full items-center gap-1 rounded-xl border px-1 transition-colors", selected ? "border-primary bg-primary/5" : "border-border/60 bg-background/20 hover:border-border hover:bg-background/35")}>
+    <button className="flex min-w-0 flex-1 items-center gap-3 px-2 py-2.5 text-left" onClick={() => onSelect(task)} type="button">
+      <span className={cn("grid size-8 shrink-0 place-items-center rounded-full", iconTone)}>{icon}</span>
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{task.name}</span>
+          <span className="text-[11px] text-muted-foreground">{new Date(task.createdAt).toLocaleTimeString(locale === "zh" ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit" })}</span>
+        </span>
+        <span className="mt-1.5 flex items-center gap-1.5">
+          <Badge className="rounded-full border-0 bg-muted px-2 py-0 text-[11px] font-normal leading-none text-muted-foreground">{task.source === "ai" ? t(locale, "task.source.ai") : t(locale, "task.source.manual")}</Badge>
+          <Badge className={cn("rounded-full border-0 px-2 py-0 text-[11px] font-normal leading-none", failed ? "bg-destructive/15 text-destructive" : completed ? "bg-primary/15 text-primary" : active ? "bg-warning/15 text-warning" : "bg-muted text-muted-foreground")}>{taskStateLabel(locale, task.state)}</Badge>
+        </span>
+      </span>
+      {selected && <ChevronRight className="size-4 shrink-0 text-primary" />}
+    </button>
+    {active && <button aria-label={t(locale, "bottom.stop")} className="mr-1 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => onCancel(task.id)} type="button"><CircleStop className="size-3.5" /></button>}
+  </div>;
 }
 
 function TaskDetail({ busy, selectedTask, logs, result, onEditSegment, onSaveCharacter, onSaveTranscript, onSaveSynthesis }: { busy: string | null; selectedTask: TaskSummary | null; logs: TaskLogEntry[]; result: { kind: "transcript" | "character" | "synthesis"; item: TranscriptDetail | VoiceCharacter | Synthesis } | null; onEditSegment: (index: number, text: string) => void; onSaveCharacter: (character: VoiceCharacter) => void; onSaveTranscript: (transcript: TranscriptDetail) => void; onSaveSynthesis: (synthesis: Synthesis) => void }) {
   const locale = useRecutLocale();
-  if (!selectedTask) return <Card className="grid h-full min-h-0 place-items-center rounded-lg shadow-none"><p className="px-4 text-center text-sm text-muted-foreground">{t(locale, "task.detailEmpty")}</p></Card>;
+  if (!selectedTask) return <Card className="grid h-full min-h-0 place-items-center"><p className="px-4 text-center text-sm text-muted-foreground">{t(locale, "task.detailEmpty")}</p></Card>;
+  const duration = (()=>{ try{ const s=new Date(selectedTask.createdAt).getTime(); return formatElapsed(Math.max(0,Math.floor((Date.now()-s)/1000))); }catch{return "--:--";}})();
+  const resultSaved = result ? result.kind === "character" ? Boolean((result.item as VoiceCharacter).sampleAssetId) : Boolean((result.item as TranscriptDetail | Synthesis).savedAssetId) : false;
   return <div className="grid h-full min-h-0 content-start gap-4 overflow-y-auto pr-1">
-    <Card className="rounded-lg shadow-none">
-      <div className="flex items-start justify-between gap-2 border-b px-4 py-3.5">
-        <div><h2 className="text-base font-semibold">{selectedTask.name}</h2><p className="mt-0.5 text-xs text-muted-foreground">{taskStateLabel(locale, selectedTask.state)} · {new Date(selectedTask.createdAt).toLocaleString(locale === "zh" ? "zh-CN" : "en-US")}</p></div>
-        <Badge variant="secondary" className="font-mono">{selectedTask.source === "ai" ? t(locale, "task.source.ai") : t(locale, "task.source.manual")}</Badge>
+    <Card>
+      <div className="flex items-start justify-between gap-2 px-4 py-3.5 border-0">
+        <div className="min-w-0"><h2 className="text-base font-semibold truncate">{selectedTask.name}</h2>
+          <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground"><span className={cn("size-1.5 rounded-full", selectedTask.state==="completed"?"bg-green-500":selectedTask.state==="failed"?"bg-red-500":"bg-amber-500")} />{taskStateLabel(locale, selectedTask.state)}</p>
+          <p className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground font-mono">ID: {selectedTask.id} <button onClick={()=>void copyText(selectedTask.id)} className="rounded p-0.5 hover:bg-muted"><Copy className="size-3" /></button></p>
+          {selectedTask.action === "design" ? <p className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground"><Wand2 className="size-3 text-primary" />{t(locale, "task.action.design")}{selectedTask.meta?.presetId ? ` · presetId: ${String(selectedTask.meta.presetId)}` : selectedTask.meta?.designDesc ? ` · ${String(selectedTask.meta.designDesc)}` : ""}</p> : null}
+        </div>
+        <div className="shrink-0 text-right"><p className="text-xs text-muted-foreground">{new Date(selectedTask.createdAt).toLocaleString(locale === "zh" ? "zh-CN" : "en-US")}</p><p className="text-[11px] text-muted-foreground">时长 {duration}</p></div>
       </div>
       <div className="grid gap-3 p-4">
         <div>
-          <p className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">{t(locale, "task.logsTitle")}</p>
-          <pre className="max-h-64 overflow-auto rounded-md bg-terminal p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg">{logs.length ? logs.map((entry) => `${entry.ts ? "[" + entry.ts + "] " : ""}${entry.message}`).join("\n") : t(locale, "task.logsEmpty")}</pre>
+          <div className="mb-2 flex items-center justify-between"><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">LOGS</p><span className="flex gap-1"><Button variant="ghost" size="sm" className="h-6 text-[11px]" onClick={()=>void copyText(logs.map(e=>e.message).join("\n"))}><Copy className="size-3" />复制</Button><Button variant="ghost" size="sm" className="h-6 text-[11px]" onClick={()=>downloadBlob(`logs-${selectedTask.id}.txt`,logs.map(e=>e.message).join("\n"),"text/plain")}><Download className="size-3" />下载</Button></span></div>
+          <pre className="max-h-64 overflow-auto rounded-xl border-0 bg-terminal p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-terminal-fg">{logs.length ? logs.map((entry) => `${entry.ts ? "[" + entry.ts + "] " : ""}${entry.message}`).join("\n") : t(locale, "task.logsEmpty")}</pre>
         </div>
       </div>
     </Card>
-    {result && <Card className="rounded-lg shadow-none">
-      <div className="border-b px-4 py-2.5"><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">{t(locale, "task.resultTitle")}</p></div>
+    {result && <Card>
+      <div className="flex items-center justify-between px-4 py-2.5"><p className="text-sm font-medium">{t(locale, "task.resultTitle")}</p>{resultSaved ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div>
+      <div className="px-4 pb-4">
       {result.kind === "transcript" ? <TranscriptOutput busy={busy} onEditSegment={onEditSegment} onSave={onSaveTranscript} transcript={result.item as TranscriptDetail} />
-        : result.kind === "character" ? <div className="p-3"><CharacterPreview busy={busy} character={result.item as VoiceCharacter} onSave={() => onSaveCharacter(result.item as VoiceCharacter)} /></div>
+        : result.kind === "character" ? <CharacterPreview busy={busy} character={result.item as VoiceCharacter} onSave={() => onSaveCharacter(result.item as VoiceCharacter)} />
         : <SynthesisOutput busy={busy} onSave={onSaveSynthesis} selected={result.item as Synthesis} syntheses={[result.item as Synthesis]} />}
+      <div className="mt-3 flex items-center justify-between text-xs"><p className="text-[11px] text-muted-foreground">{resultSaved ? t(locale, "badge.savedInLibrary") : t(locale, "badge.privatePreview")}</p>{resultSaved ? <Badge variant="secondary">{t(locale, "badge.savedInLibrary")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div>
+      </div>
     </Card>}
   </div>;
 }
@@ -690,7 +786,7 @@ function TranscribeControls({ busy, downloadSource, language, model, readySpeech
   </div>;
 }
 
-function CharacterControls({ busy, characterAsset, characterName, downloadSource, model, readySpeechModel, setDownloadSource, setCharacterName, setModel, upload, onChoose, onRun, onInstall, step, onBack, onNext }: { busy: string | null; characterAsset: MediaAsset | null; characterName: string; downloadSource: DownloadSource; model: SpeechModel; readySpeechModel: boolean; setDownloadSource: (value: DownloadSource) => void; setCharacterName: (value: string) => void; setModel: (value: SpeechModel) => void; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void; step: number; onBack: () => void; onNext: () => void }) {
+function CharacterControls({ busy, characterAsset, characterName, downloadSource, model, readySpeechModel, setDownloadSource, setCharacterName, setModel, upload, onChoose, onRun, onInstall, onDesignVoice, step, onBack, onNext }: { busy: string | null; characterAsset: MediaAsset | null; characterName: string; downloadSource: DownloadSource; model: SpeechModel; readySpeechModel: boolean; setDownloadSource: (value: DownloadSource) => void; setCharacterName: (value: string) => void; setModel: (value: SpeechModel) => void; upload: (file: File | undefined) => void; onChoose: () => void; onRun: () => void; onInstall: () => void; onDesignVoice: () => void; step: number; onBack: () => void; onNext: () => void }) {
   const locale = useRecutLocale();
   const total = 2;
   return <div className="flex flex-col gap-6">
@@ -702,6 +798,7 @@ function CharacterControls({ busy, characterAsset, characterName, downloadSource
         <Label htmlFor="character-name" className="text-xs text-muted-foreground">{t(locale, "character.name.label")}</Label>
         <Input disabled={busy !== null} id="character-name" onChange={(event) => setCharacterName(event.target.value)} placeholder={t(locale, "character.name.placeholder")} value={characterName} />
       </div>
+      <Button disabled={busy !== null} onClick={onDesignVoice} type="button" variant="outline" className="w-fit"><Wand2 className="size-3.5" />{t(locale, "design.button")}</Button>
     </ControlSection>}
     {step === 1 && <ControlSection eyebrow={t(locale, "controls.model.eyebrow")} title={t(locale, "controls.character.promptModelTitle")}>
       <ModelSelect disabled={busy !== null} model={model} onChange={setModel} />
@@ -712,13 +809,13 @@ function CharacterControls({ busy, characterAsset, characterName, downloadSource
   </div>;
 }
 
-function SynthesizeControls({ busy, characters, downloadSource, engine, engineNeedsCharacter, engineReady, setDownloadSource, setEngine, setSynthesisCharacterId, setSynthesisText, setStyle, setVoxcpmVersion, style, synthesisCharacterId, synthesisText, voxcpmEngine, voxcpmVersion, onInstall, onInstallVoxCpm, onRetryVoxCpmRuntime, onRun, step, onBack, onNext }: { busy: string | null; characters: VoiceCharacter[]; downloadSource: DownloadSource; engine: EngineFamily; engineNeedsCharacter: boolean; engineReady: boolean; setDownloadSource: (value: DownloadSource) => void; setEngine: (value: EngineFamily) => void; setSynthesisCharacterId: (value: string) => void; setSynthesisText: (value: string) => void; setStyle: (value: VoiceStyle) => void; setVoxcpmVersion: (value: VoxCpmVersion) => void; style: VoiceStyle; synthesisCharacterId: string; synthesisText: string; voxcpmEngine: VoxCpmEngineStatus | null; voxcpmVersion: VoxCpmVersion; onInstall: () => void; onInstallVoxCpm: (version: VoxCpmVersion) => void; onRetryVoxCpmRuntime: () => void; onRun: () => void; step: number; onBack: () => void; onNext: () => void }) {
+function SynthesizeControls({ busy, characters, playingPresetId, preparingPresetId, presets, presetsError, downloadSource, engine, engineNeedsCharacter, engineReady, setDownloadSource, setEngine, setSynthesisCharacterId, setSynthesisPresetId, setSynthesisText, setStyle, setVoxcpmVersion, style, synthesisCharacterId, synthesisPresetId, synthesisText, voxcpmEngine, voxcpmVersion, onInstall, onInstallVoxCpm, onRetryVoxCpmRuntime, onPreparePreset, onRun, step, onBack, onNext }: { busy: string | null; characters: VoiceCharacter[]; playingPresetId: string; preparingPresetId: string; presets: VoicePreset[]; presetsError: string; downloadSource: DownloadSource; engine: EngineFamily; engineNeedsCharacter: boolean; engineReady: boolean; setDownloadSource: (value: DownloadSource) => void; setEngine: (value: EngineFamily) => void; setSynthesisCharacterId: (value: string) => void; setSynthesisPresetId: (value: string) => void; setSynthesisText: (value: string) => void; setStyle: (value: VoiceStyle) => void; setVoxcpmVersion: (value: VoxCpmVersion) => void; style: VoiceStyle; synthesisCharacterId: string; synthesisPresetId: string; synthesisText: string; voxcpmEngine: VoxCpmEngineStatus | null; voxcpmVersion: VoxCpmVersion; onInstall: () => void; onInstallVoxCpm: (version: VoxCpmVersion) => void; onRetryVoxCpmRuntime: () => void; onPreparePreset: (presetId: string, announce: boolean) => void; onRun: () => void; step: number; onBack: () => void; onNext: () => void }) {
   const locale = useRecutLocale();
   const isVoxCpm = engine !== "cosyvoice2";
   const selectedVersion = voxcpmVersions.find((item) => item.id === voxcpmVersion) ?? voxcpmVersions[0];
   const voxcpmModel = voxcpmEngine?.models[voxcpmVersion] ?? null;
   const total = 2;
-  const canRun = !busy && Boolean(synthesisText.trim()) && engineReady && (!engineNeedsCharacter || Boolean(synthesisCharacterId));
+  const canRun = !busy && Boolean(synthesisText.trim()) && engineReady && (!engineNeedsCharacter || Boolean(synthesisCharacterId) || Boolean(synthesisPresetId));
   return <div className="flex flex-col gap-6">
     {step === 0 && <>
       <ControlSection eyebrow={t(locale, "controls.engine.eyebrow")} title={t(locale, "controls.engine.title")}>
@@ -750,11 +847,8 @@ function SynthesizeControls({ busy, characters, downloadSource, engine, engineNe
     </>}
     {step === 1 && <>
       <ControlSection eyebrow={t(locale, "controls.voice.eyebrow")} title={t(locale, "controls.voice.title")}>
-        <div className="grid max-h-52 gap-1 overflow-auto pr-1">
-          {(!isVoxCpm || voxcpmVersion === "voxcpm2") && <button aria-pressed={!synthesisCharacterId} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", !synthesisCharacterId ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} onClick={() => setSynthesisCharacterId("")} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{isVoxCpm ? t(locale, "voxcpm.defaultVoice") : t(locale, "character.defaultVoice")}</strong><small className="truncate text-muted-foreground">{isVoxCpm ? t(locale, "voxcpm.defaultVoiceNote") : t(locale, "character.defaultVoiceNote")}</small></span>{!synthesisCharacterId && <Check className="size-3.5 shrink-0 text-primary" />}</button>}
-          {characters.map((character) => <button aria-pressed={synthesisCharacterId === character.id} className={cn("flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-50", synthesisCharacterId === character.id ? "border-primary bg-accent" : "hover:bg-muted")} disabled={busy !== null} key={character.id} onClick={() => setSynthesisCharacterId(character.id)} type="button"><span className="grid min-w-0 gap-0.5"><strong className="truncate font-medium">{character.name}</strong><small className="truncate text-muted-foreground">{character.promptText ? tF(locale, "character.promptReady", { count: character.promptText.length }) : t(locale, "character.promptMissing")}</small></span>{synthesisCharacterId === character.id && <Check className="size-3.5 shrink-0 text-primary" />}</button>)}
-        </div>
-        {engineNeedsCharacter && !synthesisCharacterId && <p className="text-[11px] leading-relaxed text-destructive">{t(locale, "voxcpm.needsCharacter")}</p>}
+        <VoicePicker busy={busy} characters={characters} defaultVoiceLabelKey={isVoxCpm ? "voxcpm.defaultVoice" : "character.defaultVoice"} onPreviewPreset={(id) => void onPreparePreset(id, true)} onSelectCharacter={(id) => { setSynthesisCharacterId(id); setSynthesisPresetId(""); }} onSelectPreset={(id) => { setSynthesisPresetId(id); setSynthesisCharacterId(""); void onPreparePreset(id, false); }} playingPresetId={playingPresetId} preparingPresetId={preparingPresetId} presets={presets} presetsError={presetsError} selectedCharacterId={synthesisCharacterId} selectedPresetId={synthesisPresetId} showDefaultVoice={!isVoxCpm || voxcpmVersion === "voxcpm2"} />
+        {engineNeedsCharacter && !synthesisCharacterId && !synthesisPresetId && <p className="text-[11px] leading-relaxed text-destructive">{t(locale, "voxcpm.needsCharacter")}</p>}
       </ControlSection>
       {!isVoxCpm && <ControlSection eyebrow={t(locale, "controls.style.eyebrow")} title={t(locale, "controls.style.title")}>
         <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/50 p-1">{styles.map((item) => <Button className={cn(style === item.id && "bg-background text-foreground shadow-xs hover:bg-background")} disabled={busy !== null} key={item.id} onClick={() => setStyle(item.id)} title={t(locale, item.noteKey)} type="button" variant="ghost" size="sm">{t(locale, item.labelKey)}</Button>)}</div>
@@ -782,7 +876,7 @@ function Setup({ autoPrepare, busy, elapsedSeconds, failure, failureLogs, logs, 
   useEffect(() => { if (autoPrepare && !started.current) { started.current = true; onPrepare(); } }, [autoPrepare, onPrepare]);
   const failureText = failureLogs.length ? failureLogs.map((entry) => entry.text).join("") : "";
   return <div className="mx-auto mt-[10vh] w-full max-w-lg">
-    <Card className="rounded-lg shadow-none">
+    <Card>
       <CardHeader>
         <div className="mb-2 grid size-10 place-items-center rounded-md border bg-accent text-primary"><LoaderCircle className={cn("size-5", busy === "prepare" && "animate-spin")} /></div>
         <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "app.title")}</p>
@@ -808,7 +902,7 @@ function TranscriptOutput({ busy, transcript, onEditSegment, onSave }: { busy: s
   const srt = transcript ? buildSRT(transcript.segments) : "";
   const copy = async () => { if (!transcript) return; if (await copyText(srt)) { setCopied(true); window.setTimeout(() => setCopied(false), 1600); } };
   return <CardContent className="flex h-full flex-col gap-4">
-    <div className="flex items-center justify-between gap-3 border-b pb-3">
+    <div className="flex items-center justify-between gap-3 pb-3">
       <div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "output.transcript.eyebrow")}</p><h2 className="mt-0.5 text-sm font-semibold">{t(locale, "output.transcript.title")}</h2></div>
       {transcript && <div className="flex gap-1.5"><Button disabled={!transcript} onClick={() => void copy()} type="button" variant="outline" size="sm">{copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copied ? t(locale, "copy.copied") : t(locale, "copy.srt")}</Button><Button disabled={!transcript} onClick={() => transcript && downloadBlob(`transcript-${transcript.id}.srt`, srt, "text/plain")} type="button" variant="outline" size="sm"><Download className="size-3.5" />SRT</Button><Button disabled={!transcript} onClick={() => transcript && downloadBlob(`transcript-${transcript.id}.json`, JSON.stringify({ model: transcript.model, language: transcript.language, duration: transcript.duration, segments: transcript.segments }, null, 2), "application/json")} type="button" variant="outline" size="sm"><FileAudio className="size-3.5" />JSON</Button></div>}
     </div>
@@ -827,14 +921,14 @@ function TranscriptOutput({ busy, transcript, onEditSegment, onSave }: { busy: s
 
 function CharacterPreview({ busy, character, onRemove, onSave }: { busy: string | null; character: VoiceCharacter; onRemove?: () => void; onSave: () => void }) {
   const locale = useRecutLocale();
-  return <Card className="rounded-lg shadow-none"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-3"><CardTitle className="min-w-0 truncate text-sm">{character.name}</CardTitle>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div><CardDescription className="text-[11px]">{tF(locale, "character.referenceTranscript", { model: character.model.replace("whisper-", ""), time: timestamp(locale, character.createdAt) })}</CardDescription></CardHeader><CardContent className="grid gap-3"><audio className="w-full" controls preload="metadata" src={character.sampleURL} /><div className="grid gap-1"><p className="text-[11px] font-medium text-muted-foreground">{t(locale, "character.prompt.label")}</p><p className="max-h-32 overflow-auto rounded-md bg-muted/60 p-2.5 text-xs leading-relaxed">{character.promptText || t(locale, "character.prompt.missing")}</p></div></CardContent><CardFooter className="justify-between gap-2"><Button disabled={busy !== null || Boolean(character.sampleAssetId)} onClick={onSave} type="button" variant="outline" size="sm"><Save className="size-3.5" />{character.sampleAssetId ? t(locale, "badge.savedInLibrary") : t(locale, "save.referenceAudio")}</Button>{onRemove && <Button disabled={busy !== null} onClick={onRemove} type="button" variant="ghost" size="sm" className="text-destructive hover:text-destructive"><Trash2 className="size-3.5" />{t(locale, "delete")}</Button>}</CardFooter></Card>;
+  return <Card><CardHeader className="pb-2"><div className="flex items-center justify-between gap-3"><CardTitle className="min-w-0 truncate text-sm">{character.name}</CardTitle>{character.sampleAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.private")}</Badge>}</div><CardDescription className="text-[11px]">{tF(locale, "character.referenceTranscript", { model: character.model.replace("whisper-", ""), time: timestamp(locale, character.createdAt) })}</CardDescription></CardHeader><CardContent className="grid gap-3"><audio className="w-full" controls preload="metadata" src={character.sampleURL} /><div className="grid gap-1"><p className="text-[11px] font-medium text-muted-foreground">{t(locale, "character.prompt.label")}</p><p className="max-h-32 overflow-auto rounded-md bg-muted/60 p-2.5 text-xs leading-relaxed">{character.promptText || t(locale, "character.prompt.missing")}</p></div></CardContent><CardFooter className="justify-between gap-2"><Button disabled={busy !== null || Boolean(character.sampleAssetId)} onClick={onSave} type="button" variant="outline" size="sm"><Save className="size-3.5" />{character.sampleAssetId ? t(locale, "badge.savedInLibrary") : t(locale, "save.referenceAudio")}</Button>{onRemove && <Button disabled={busy !== null} onClick={onRemove} type="button" variant="ghost" size="sm" className="text-destructive hover:text-destructive"><Trash2 className="size-3.5" />{t(locale, "delete")}</Button>}</CardFooter></Card>;
 }
 
 function SynthesisOutput({ busy, selected, syntheses, onSave }: { busy: string | null; selected: Synthesis | null; syntheses: Synthesis[]; onSave: (synthesis: Synthesis) => void }) {
   const locale = useRecutLocale();
   const current = selected ?? syntheses[0] ?? null;
   return <CardContent className="flex h-full flex-col gap-4">
-    <div className="flex items-center justify-between border-b pb-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "output.synthesis.eyebrow")}</p><h2 className="mt-0.5 text-sm font-semibold">{t(locale, "output.synthesis.title")}</h2></div>{current && (current.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.privatePreview")}</Badge>)}</div>
+    <div className="flex items-center justify-between pb-3"><div><p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">{t(locale, "output.synthesis.eyebrow")}</p><h2 className="mt-0.5 text-sm font-semibold">{t(locale, "output.synthesis.title")}</h2></div>{current && (current.savedAssetId ? <Badge variant="secondary"><Check className="mr-1 size-3" />{t(locale, "badge.saved")}</Badge> : <Badge variant="outline">{t(locale, "badge.privatePreview")}</Badge>)}</div>
     <div className="grid flex-1 place-items-center">
       {current ? <div className="grid w-full max-w-md gap-3"><div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"><div className="grid gap-0.5"><strong className="text-xs font-medium">{engineLabel(locale, current.engine)} · {t(locale, "synthesis.current")}</strong><small className="text-[11px] text-muted-foreground">{tF(locale, "synthesis.detail", { style: styleLabel(locale, current.style), duration: current.duration.toFixed(1), time: timestamp(locale, current.createdAt) })}</small></div>{current.savedAssetId ? <Check className="size-4 text-primary" /> : null}</div><audio className="w-full" controls src={current.outputURL} /></div> : <div className="grid max-w-60 place-items-center gap-2 text-center text-sm text-muted-foreground"><Sparkles className="size-7 text-muted-foreground/60" /><p>{t(locale, "synthesis.empty")}</p></div>}
     </div>

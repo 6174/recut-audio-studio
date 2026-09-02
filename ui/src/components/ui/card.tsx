@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 依赖 React HTML 属性、cn 类名合并工具与 ui/src 的语义颜色令牌
+ * [OUTPUT]: 对外提供统一的 Card、CardHeader、CardContent、CardFooter、CardTitle、CardDescription、CardAction 容器组件
+ * [POS]: audio-studio UI 的基础面板层；所有工作区面板共享同一背景、边框、圆角和阴影基线，业务状态由调用方额外叠加
+ * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
+ */
 import * as React from "react"
 
 import { cn } from "@/lib/utils"
@@ -12,7 +18,7 @@ function Card({
       data-slot="card"
       data-size={size}
       className={cn(
-        "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-lg bg-card py-(--card-spacing) text-xs/relaxed text-card-foreground ring-1 ring-foreground/10 [--card-spacing:--spacing(4)] has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(3)] *:[img:first-child]:rounded-t-lg *:[img:last-child]:rounded-b-lg",
+        "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-2xl border border-border/70 bg-card py-(--card-spacing) text-xs/relaxed text-card-foreground shadow-none ring-0 [--card-spacing:--spacing(4)] has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(3)] *:[img:first-child]:rounded-t-lg *:[img:last-child]:rounded-b-lg",
         className
       )}
       {...props}

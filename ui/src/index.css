@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 Tailwind CSS v4 与 tw-animate-css
- * [OUTPUT]: 对外提供与 Recut 平台一致的颜色、排版和响应式布局
- * [POS]: ui/src 的视觉基础层；组件通过语义角色消费颜色，不直接使用原始色值
+ * [OUTPUT]: 对外提供与 Recut 平台一致的颜色、排版、深色工作台背景和响应式布局
+ * [POS]: ui/src 的视觉基础层；组件通过语义角色消费颜色，页面用低对比边界和绿色主色建立工作流层级
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 @import "tailwindcss";
@@ -75,6 +75,6 @@
 
 @layer base {
   * { @apply border-border outline-ring/50; }
-  body { @apply min-h-screen bg-background font-sans text-foreground antialiased; letter-spacing: 0; }
+  body { @apply min-h-screen bg-background font-sans text-foreground antialiased; letter-spacing: 0; background-image: radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 7%, transparent), transparent 28rem), radial-gradient(circle at 92% 8%, color-mix(in oklch, var(--primary) 4%, transparent), transparent 24rem); }
   ::selection { background: var(--accent); color: var(--accent-foreground); }
 }

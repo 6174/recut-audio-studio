@@ -73,6 +73,24 @@
       "inputSchema": { "type": "object", "required": ["assetId", "name", "model"], "properties": { "assetId": { "type": "string" }, "name": { "type": "string" }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] } } }
     },
     {
+      "name": "audio.presets",
+      "surfaces": ["api", "mcp"],
+      "description": "枚举声音工坊的默认声音预设清单（20 个中文风格预设）：权威源是 CDN 版本 manifest（10s 超时失败静默回退 App 内置 bootstrap 清单，source 字段标明来源）。返回 id、双语名称、场景标签、听感描述、设计描述、版本与本地缓存状态；只读无副作用，结果不落库。",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "audio.preset.prepare",
+      "surfaces": ["api"],
+      "description": "按需准备一个声音预设的参考音到 App 私有缓存（缓存查 → CDN 下载 + sha256 校验），返回私有 previewURL、字节数、版本与 promptText；仅 UI 试听使用，不暴露 MCP——MCP 合成链路在内部走同一 resolve 流程，无需单独调用。",
+      "inputSchema": { "type": "object", "required": ["presetId"], "properties": { "presetId": { "type": "string", "description": "声音预设 id（见 audio.presets）。" } } }
+    },
+    {
+      "name": "audio.character.design",
+      "surfaces": ["api", "mcp"],
+      "description": "用 VoxCPM2 Voice Design 音色描述或一个声音预设创建声音角色：presetId 分支零推理（解析预设参考音缓存/下载后直接落为角色）；designDesc 分支由 VoxCPM2 生成探针并经 Qwen3-ASR 回读验收（≥0.85）后建角色。产物是 origin=design/preset 的普通角色，用 audio.character.complete 读取、audio.save(id, kind:character) 入库。异步提交，立即返回 job；用平台 recut.job.status / recut.job.wait 轮询终态。",
+      "inputSchema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "description": "角色名，必填。" }, "designDesc": { "type": "string", "maxLength": 120, "description": "中文音色描述（年龄/性别 + 音色质地 + 语速节奏 + 参照场景，不写真实人名）；与 presetId 二选一。" }, "presetId": { "type": "string", "description": "声音预设 id（见 audio.presets）；与 designDesc 二选一。" }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"], "description": "可选；回读验收 ASR 模型，缺省 qwen3-asr-0.6b。" }, "saveToLibrary": { "type": "boolean", "description": "可选；true 时终态后自动把参考音导入素材库并返回 assetId（World voice_reference 链路依赖）。" } } }
+    },
+    {
       "name": "audio.character.complete",
       "surfaces": ["api"],
       "description": "在角色任务完成后读取参考音和提示词，返回可播放的声音角色。",
@@ -94,8 +112,8 @@
       "name": "audio.synthesize",
       "surfaces": ["api", "mcp"],
       "capability": true,
-      "description": "用一段文本和可选声音角色合成配音；engine 缺省使用 CosyVoice 官方默认声音，可选 VoxCPM2/1.5/0.5B（VoxCPM2 无角色时用 Voice Design 默认音，VoxCPM1.5/0.5B 必须提供角色参考音）。所有输出均须通过 ASR 回读文本验收才返回异步任务结果。",
-      "inputSchema": { "type": "object", "required": ["text"], "properties": { "characterId": { "type": "string", "description": "可选；缺省时 CosyVoice 用官方默认声音、VoxCPM2 用 Voice Design 默认音，VoxCPM1.5/0.5B 必填。" }, "text": { "type": "string" }, "engine": { "type": "string", "enum": ["cosyvoice2", "voxcpm2", "voxcpm1.5", "voxcpm-0.5b"], "description": "可选；缺省 cosyvoice2。" }, "style": { "type": "string", "enum": ["neutral", "calm", "excited", "gentle"], "description": "可选；仅 cosyvoice2 生效。" } } }
+      "description": "用一段文本和可选声音角色合成配音；engine 缺省使用 CosyVoice 官方默认声音，可选 VoxCPM2/1.5/0.5B（VoxCPM2 无角色时用 Voice Design 默认音，VoxCPM1.5/0.5B 必须提供角色参考音）。characterId 与 presetId 互斥；传 presetId 时按需解析声音预设（缓存 → CDN 下载，sha256 校验）作为参考音走同一角色路径。所有输出均须通过 ASR 回读文本验收才返回异步任务结果。",
+      "inputSchema": { "type": "object", "required": ["text"], "properties": { "characterId": { "type": "string", "description": "可选；缺省时 CosyVoice 用官方默认声音、VoxCPM2 用 Voice Design 默认音，VoxCPM1.5/0.5B 必填。与 presetId 互斥。" }, "presetId": { "type": "string", "description": "可选；声音预设 id（见 audio.presets），解析为固化参考音后走既有合成路径。与 characterId 互斥。" }, "text": { "type": "string" }, "engine": { "type": "string", "enum": ["cosyvoice2", "voxcpm2", "voxcpm1.5", "voxcpm-0.5b"], "description": "可选；缺省 cosyvoice2。" }, "style": { "type": "string", "enum": ["neutral", "calm", "excited", "gentle"], "description": "可选；仅 cosyvoice2 生效。" } } }
     },
     {
       "name": "audio.synthesis.complete",

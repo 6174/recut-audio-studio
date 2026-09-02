@@ -1,0 +1,267 @@
+{
+  "version": "v1",
+  "probeText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+  "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+  "presets": [
+    {
+      "id": "neutral-female",
+      "name": {
+        "zh": "小雅 · 中性女声",
+        "en": "Xiaoya · Neutral Female"
+      },
+      "scene": "general",
+      "blurb": {
+        "zh": "自然亲切的年轻女声",
+        "en": "Natural, friendly young female voice"
+      },
+      "designDesc": "一位年轻、温和的中文女声，语气自然亲切"
+    },
+    {
+      "id": "jieshuo-xiaoshuai",
+      "name": {
+        "zh": "解说 · 小帅风",
+        "en": "Narrator · Xiaoshuai"
+      },
+      "scene": "narration",
+      "blurb": {
+        "zh": "磁性男声，语速中快，悬疑开场腔",
+        "en": "Magnetic male narrator with a suspense hook"
+      },
+      "designDesc": "一位成熟磁性的中文男声，吐字清晰，语速稍快，带着一点点悬念感，像电影解说旁白"
+    },
+    {
+      "id": "qinggan-nv",
+      "name": {
+        "zh": "情感 · 暖阳",
+        "en": "Emotion · Warm Sun"
+      },
+      "scene": "emotion",
+      "blurb": {
+        "zh": "温柔治愈、慢节奏、气声多",
+        "en": "Gentle, healing, slow-paced female voice"
+      },
+      "designDesc": "一位温柔的中文女声，语速缓慢，气息轻柔，像深夜电台的治愈系主播"
+    },
+    {
+      "id": "xuanyi-nan",
+      "name": {
+        "zh": "悬疑 · 低语",
+        "en": "Suspense · Undertone"
+      },
+      "scene": "suspense",
+      "blurb": {
+        "zh": "低沉压迫感，句尾下沉",
+        "en": "Deep, brooding male voice for suspense"
+      },
+      "designDesc": "一位低沉的中文男声，语气冷静克制，带压迫感，适合讲述悬疑案件"
+    },
+    {
+      "id": "tongsheng-nv",
+      "name": {
+        "zh": "童声 · 糖糖",
+        "en": "Kid · Tangtang"
+      },
+      "scene": "kids",
+      "blurb": {
+        "zh": "天真烂漫，叠词自然",
+        "en": "Innocent, lively little-girl voice"
+      },
+      "designDesc": "一个天真活泼的中文小女孩声音，语气稚嫩可爱，像在读儿童故事"
+    },
+    {
+      "id": "daihuo-nv",
+      "name": {
+        "zh": "带货 · 小燃",
+        "en": "Live · Xiaoran"
+      },
+      "scene": "commerce",
+      "blurb": {
+        "zh": "活泼高亢，促单节奏",
+        "en": "Energetic live-commerce female voice"
+      },
+      "designDesc": "一位充满活力的中文女声，热情明快，语速偏快，像直播间带货主播"
+    },
+    {
+      "id": "bobao-nan",
+      "name": {
+        "zh": "播报 · 正声",
+        "en": "Anchor · Zhongsheng"
+      },
+      "scene": "podcast",
+      "blurb": {
+        "zh": "端正干练、字正腔圆",
+        "en": "Crisp, authoritative news-anchor male voice"
+      },
+      "designDesc": "一位沉稳干练的中文男声，字正腔圆，像新闻播音员"
+    },
+    {
+      "id": "zhixing-nv",
+      "name": {
+        "zh": "知性 · 静姝",
+        "en": "Insight · Jingshu"
+      },
+      "scene": "podcast",
+      "blurb": {
+        "zh": "知性温和、从容不迫",
+        "en": "Calm, knowledgeable female narrator"
+      },
+      "designDesc": "一位知性从容的中文女声，语速平稳，清晰温和，像科普纪录片旁白"
+    },
+    {
+      "id": "dongbei",
+      "name": {
+        "zh": "东北 · 老铁",
+        "en": "Dongbei · Laotie"
+      },
+      "scene": "dialect",
+      "blurb": {
+        "zh": "东北口音，豪爽幽默",
+        "en": "Humorous Northeast-accented male voice"
+      },
+      "designDesc": "一位说东北口音普通话的中年男声，豪爽幽默，像和熟人唠嗑"
+    },
+    {
+      "id": "yueyu-nan",
+      "name": {
+        "zh": "粤语 · 阿乐",
+        "en": "Cantonese · Ah Lok"
+      },
+      "scene": "dialect",
+      "blurb": {
+        "zh": "地道粤语男声",
+        "en": "Authentic Cantonese male voice"
+      },
+      "designDesc": "一位地道的粤语男声，自然流利，像香港电视剧配音"
+    },
+    {
+      "id": "sichuan-nv",
+      "name": {
+        "zh": "川渝 · 幺妹",
+        "en": "Sichuan · Yaomei"
+      },
+      "scene": "dialect",
+      "blurb": {
+        "zh": "亲切四川话女声",
+        "en": "Warm Sichuan-accented female voice"
+      },
+      "designDesc": "一位亲切的四川话女声，语气泼辣爽朗，像成都街头主播"
+    },
+    {
+      "id": "tuokouxiu-nan",
+      "name": {
+        "zh": "喜剧 · 贫嘴",
+        "en": "Comedy · Pinzui"
+      },
+      "scene": "narration",
+      "blurb": {
+        "zh": "诙谐、节奏感强、爱抖包袱",
+        "en": "Witty, punchy stand-up style male voice"
+      },
+      "designDesc": "一位诙谐的中文男声，节奏感强，语气夸张生动，像脱口秀演员"
+    },
+    {
+      "id": "dashu-wennuan",
+      "name": {
+        "zh": "大叔 · 沉稳",
+        "en": "Uncle · Steady"
+      },
+      "scene": "podcast",
+      "blurb": {
+        "zh": "浑厚温暖的长者声线",
+        "en": "Warm, resonant middle-aged male voice"
+      },
+      "designDesc": "一位四十多岁的中文男声，声音浑厚温暖，像在炉边讲故事的旁白者"
+    },
+    {
+      "id": "boke-nan",
+      "name": {
+        "zh": "播客 · 闲谈",
+        "en": "Podcast · Chat"
+      },
+      "scene": "podcast",
+      "blurb": {
+        "zh": "松弛对话感、像和朋友聊天",
+        "en": "Relaxed conversational male voice"
+      },
+      "designDesc": "一位放松自然的中文男声，像和朋友聊天，语气随和有呼吸感"
+    },
+    {
+      "id": "shaonv-yuanqi",
+      "name": {
+        "zh": "元气 · 跳跳",
+        "en": "Vlog · Tiaotiao"
+      },
+      "scene": "general",
+      "blurb": {
+        "zh": "元气满满、语速轻快",
+        "en": "Bubbly, fast-paced young female voice"
+      },
+      "designDesc": "一位元气满满的中文年轻女声，语速轻快，笑声感明显，像生活 vlog 博主"
+    },
+    {
+      "id": "jiaocheng-nv",
+      "name": {
+        "zh": "教程 · 清晰姐",
+        "en": "Tutorial · Qingxi"
+      },
+      "scene": "general",
+      "blurb": {
+        "zh": "清晰利落、干脆利落",
+        "en": "Clear, crisp tutorial female voice"
+      },
+      "designDesc": "一位清晰利落的中文女声，咬字干脆，语速适中，像产品测评博主"
+    },
+    {
+      "id": "lishi-nan",
+      "name": {
+        "zh": "历史 · 说书人",
+        "en": "History · Storyteller"
+      },
+      "scene": "narration",
+      "blurb": {
+        "zh": "苍劲说书腔",
+        "en": "Classic pingshu-style storyteller male voice"
+      },
+      "designDesc": "一位苍劲有力的中文男声，像评书演员，抑扬顿挫，娓娓道来"
+    },
+    {
+      "id": "guanggao-nan",
+      "name": {
+        "zh": "广告 · 磁性嗓",
+        "en": "Ad · Magnetic"
+      },
+      "scene": "commerce",
+      "blurb": {
+        "zh": "深沉磁性、高级感",
+        "en": "Deep, magnetic premium ad male voice"
+      },
+      "designDesc": "一位深沉磁性的中文男声，语速偏慢，字字有力，像高端品牌广告旁白"
+    },
+    {
+      "id": "xiaodidi",
+      "name": {
+        "zh": "少年 · 阳阳",
+        "en": "Teen · Yangyang"
+      },
+      "scene": "kids",
+      "blurb": {
+        "zh": "阳光少年音",
+        "en": "Sunny teenage male voice"
+      },
+      "designDesc": "一位十五六岁的中文少年声音，阳光开朗，朝气蓬勃"
+    },
+    {
+      "id": "yeyin-tanci",
+      "name": {
+        "zh": "御姐 · 冷艳",
+        "en": "Belle · Lengyan"
+      },
+      "scene": "emotion",
+      "blurb": {
+        "zh": "冷艳御姐、慵懒中带锋利",
+        "en": "Cool, sharp, sultry female voice"
+      },
+      "designDesc": "一位冷艳的中文女声，语气慵懒中带着锋利，像都市剧中的御姐角色"
+    }
+  ]
+}

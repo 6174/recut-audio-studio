@@ -38,6 +38,10 @@ From a reference clip the system extracts a 3–6s continuous speech segment, va
 
 Default **CosyVoice2** (official default voice or voice-cloned), optional **VoxCPM** (VoxCPM2 ~5.0GB / VoxCPM1.5 ~2.0GB / VoxCPM-0.5B ~1.6GB): VoxCPM2 supports 30 languages and a Voice Design default voice; VoxCPM1.5/0.5B require a character reference.
 
+### Default voices and voice design
+
+20 built-in Chinese style preset voices (`audio.presets`; reference audio is hosted on the CDN and cached on first use, with a bundled fallback list offline), or design a voice character from a Chinese description (age/gender + timbre + pacing + reference scene) via VoxCPM2 Voice Design (`audio.character.design`), or save a preset as your own private character.
+
 ### Connected to the Editor caption workflow
 
 Transcripts are saved as platform `transcript` Assets (source audio + SRT + JSON bundle). The Editor reuses them via the capability bridge (`audio.transcribe` / `audio.save`) to generate caption tracks and editable scripts.
@@ -46,7 +50,7 @@ Transcripts are saved as platform `transcript` Assets (source audio + SRT + JSON
 
 1. **Prepare the environment**: auto-setup on first open, or download models on demand (Hugging Face / ModelScope / automatic fallback).
 2. **Transcribe**: pick an audio or video Asset, model and language, generate transcript and SRT, then save as a transcript Asset.
-3. **Create a voice character**: pick a clean voice clip, name it and create — preprocessing and verification run automatically.
+3. **Create a voice character**: pick a clean voice clip, name it and create — preprocessing and verification run automatically; or pick one of the 20 built-in presets, or design a voice from a description (`audio.character.design`).
 4. **Synthesize**: enter text, choose engine and character (optional), preview privately and save as an audio Asset.
 5. **Back to the Editor**: use subtitles and dubbing Assets on the timeline and export.
 
@@ -56,6 +60,8 @@ Transcripts are saved as platform `transcript` Assets (source audio + SRT + JSON
 | --- | --- | --- |
 | **Local transcription** | Audio/video to timestamped transcript and SRT (auto/zh/en) | `audio.transcribe` · `audio.transcript` · `audio.transcripts` |
 | **Voice characters** | Create reusable characters from a reference clip with verification | `audio.character.create` · `audio.characters` · `audio.character.remove` |
+| **Default voices** | 20 Chinese style presets, fetched from CDN on demand | `audio.presets` |
+| **Voice design** | Create a voice character from a Chinese description (VoxCPM2 Voice Design) or a preset | `audio.character.design` |
 | **Speech synthesis** | Read new text with the default voice or a character (CosyVoice2 / VoxCPM) | `audio.synthesize` · `audio.syntheses` |
 | **Save to library** | Save private transcripts/syntheses/character references as Assets | `audio.save` |
 | **Environment & models** | Check Python/FFmpeg/models/engines and install on demand | `audio.status` · `audio.prepare` · `audio.install` |
@@ -83,7 +89,7 @@ The Agent calls transcription and save via the capability bridge; results return
 
 - **Model management**: download Whisper / Qwen3-ASR / CosyVoice2 / VoxCPM weights; switch source.
 - **Transcribe**: pick media and language, review segments and SRT, save as transcript Asset.
-- **Voice characters**: pick a reference clip, name and create, review verification and character list.
+- **Voice characters**: pick a reference clip, name and create, or choose a built-in preset in the "Presets" tab, or create from a description in the "Design voice" dialog; review verification and character list.
 - **Synthesize**: enter text, choose engine and character, preview and save.
 - **Tasks & logs**: view current and past tasks, open persistent logs, cancel running jobs.
 

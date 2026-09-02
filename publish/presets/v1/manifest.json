@@ -1,0 +1,607 @@
+{
+  "version": "v1",
+  "probeText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+  "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+  "presets": [
+    {
+      "id": "neutral-female",
+      "name": {
+        "zh": "小雅 · 中性女声",
+        "en": "Xiaoya · Neutral Female"
+      },
+      "scene": "general",
+      "blurb": {
+        "zh": "自然亲切的年轻女声",
+        "en": "Natural, friendly young female voice"
+      },
+      "designDesc": "一位年轻、温和的中文女声，语气自然亲切",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位年轻、温和的中文女声，语气自然亲切",
+        "seed": 42
+      },
+      "url": "./neutral-female.wav",
+      "sha256": "dccf6fe27219be3ca7573ff766cb90591455ea8f20982230f1b410c691014d55",
+      "bytes": 983084,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "jieshuo-xiaoshuai",
+      "name": {
+        "zh": "解说 · 小帅风",
+        "en": "Narrator · Xiaoshuai"
+      },
+      "scene": "narration",
+      "blurb": {
+        "zh": "磁性男声，语速中快，悬疑开场腔",
+        "en": "Magnetic male narrator with a suspense hook"
+      },
+      "designDesc": "一位成熟磁性的中文男声，吐字清晰，语速稍快，带着一点点悬念感，像电影解说旁白",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位成熟磁性的中文男声，吐字清晰，语速稍快，带着一点点悬念感，像电影解说旁白",
+        "seed": 42
+      },
+      "url": "./jieshuo-xiaoshuai.wav",
+      "sha256": "27db60ff1fc9ac645384a20df46a4784d7c680d0a29e8ccd13a75484a477546f",
+      "bytes": 983084,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "qinggan-nv",
+      "name": {
+        "zh": "情感 · 暖阳",
+        "en": "Emotion · Warm Sun"
+      },
+      "scene": "emotion",
+      "blurb": {
+        "zh": "温柔治愈、慢节奏、气声多",
+        "en": "Gentle, healing, slow-paced female voice"
+      },
+      "designDesc": "一位温柔的中文女声，语速缓慢，气息轻柔，像深夜电台的治愈系主播",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位温柔的中文女声，语速缓慢，气息轻柔，像深夜电台的治愈系主播",
+        "seed": 42
+      },
+      "url": "./qinggan-nv.wav",
+      "sha256": "e9e0c2ece7efa6bd6b8ffe5b6519ebaaff7e2112c770e269dfc2c2ff5ae1e107",
+      "bytes": 1182764,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "xuanyi-nan",
+      "name": {
+        "zh": "悬疑 · 低语",
+        "en": "Suspense · Undertone"
+      },
+      "scene": "suspense",
+      "blurb": {
+        "zh": "低沉压迫感，句尾下沉",
+        "en": "Deep, brooding male voice for suspense"
+      },
+      "designDesc": "一位低沉的中文男声，语气冷静克制，带压迫感，适合讲述悬疑案件",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位低沉的中文男声，语气冷静克制，带压迫感，适合讲述悬疑案件",
+        "seed": 42
+      },
+      "url": "./xuanyi-nan.wav",
+      "sha256": "ae7a4f4b8cae379f0a2161d9075344a3188b719e65b667ed7e206e63c943b917",
+      "bytes": 983084,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "tongsheng-nv",
+      "name": {
+        "zh": "童声 · 糖糖",
+        "en": "Kid · Tangtang"
+      },
+      "scene": "kids",
+      "blurb": {
+        "zh": "天真烂漫，叠词自然",
+        "en": "Innocent, lively little-girl voice"
+      },
+      "designDesc": "一个天真活泼的中文小女孩声音，语气稚嫩可爱，像在读儿童故事",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一个天真活泼的中文小女孩声音，语气稚嫩可爱，像在读儿童故事",
+        "seed": 42
+      },
+      "url": "./tongsheng-nv.wav",
+      "sha256": "24604ac4389b7abb986f8caaf48f2ea84331538f215efc1a198a906264f7994a",
+      "bytes": 998444,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "daihuo-nv",
+      "name": {
+        "zh": "带货 · 小燃",
+        "en": "Live · Xiaoran"
+      },
+      "scene": "commerce",
+      "blurb": {
+        "zh": "活泼高亢，促单节奏",
+        "en": "Energetic live-commerce female voice"
+      },
+      "designDesc": "一位充满活力的中文女声，热情明快，语速偏快，像直播间带货主播",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位充满活力的中文女声，热情明快，语速偏快，像直播间带货主播",
+        "seed": 42
+      },
+      "url": "./daihuo-nv.wav",
+      "sha256": "22793863b237dcb032b271a6c1c6d1be85fa94763c433665339a0c98bb506f3c",
+      "bytes": 768044,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "bobao-nan",
+      "name": {
+        "zh": "播报 · 正声",
+        "en": "Anchor · Zhongsheng"
+      },
+      "scene": "podcast",
+      "blurb": {
+        "zh": "端正干练、字正腔圆",
+        "en": "Crisp, authoritative news-anchor male voice"
+      },
+      "designDesc": "一位沉稳干练的中文男声，字正腔圆，像新闻播音员",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位沉稳干练的中文男声，字正腔圆，像新闻播音员",
+        "seed": 42
+      },
+      "url": "./bobao-nan.wav",
+      "sha256": "d23a3ecb5808c4996588f9e70290deaabcd374ee5ff771262cd2d94be9cd9712",
+      "bytes": 937004,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "zhixing-nv",
+      "name": {
+        "zh": "知性 · 静姝",
+        "en": "Insight · Jingshu"
+      },
+      "scene": "podcast",
+      "blurb": {
+        "zh": "知性温和、从容不迫",
+        "en": "Calm, knowledgeable female narrator"
+      },
+      "designDesc": "一位知性从容的中文女声，语速平稳，清晰温和，像科普纪录片旁白",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位知性从容的中文女声，语速平稳，清晰温和，像科普纪录片旁白",
+        "seed": 42
+      },
+      "url": "./zhixing-nv.wav",
+      "sha256": "399958c8bda56dfeb61fe2228fd79b8e1dbe2ca2632661fe29462a2385219d28",
+      "bytes": 1029164,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "dongbei",
+      "name": {
+        "zh": "东北 · 老铁",
+        "en": "Dongbei · Laotie"
+      },
+      "scene": "dialect",
+      "blurb": {
+        "zh": "东北口音，豪爽幽默",
+        "en": "Humorous Northeast-accented male voice"
+      },
+      "designDesc": "一位说东北口音普通话的中年男声，豪爽幽默，像和熟人唠嗑",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位说东北口音普通话的中年男声，豪爽幽默，像和熟人唠嗑",
+        "seed": 42
+      },
+      "url": "./dongbei.wav",
+      "sha256": "0711e0f9f0f0a859aff94c5b490b33febd76d32fba110f7db68ee44ae3350174",
+      "bytes": 1044524,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "yueyu-nan",
+      "name": {
+        "zh": "粤语 · 阿乐",
+        "en": "Cantonese · Ah Lok"
+      },
+      "scene": "dialect",
+      "blurb": {
+        "zh": "地道粤语男声",
+        "en": "Authentic Cantonese male voice"
+      },
+      "designDesc": "一位地道的粤语男声，自然流利，像香港电视剧配音",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位地道的粤语男声，自然流利，像香港电视剧配音",
+        "seed": 42
+      },
+      "url": "./yueyu-nan.wav",
+      "sha256": "74dacb16e38b8d4771e2c255dc26e3020cf6440cb5df313d4cdc114c54d3596a",
+      "bytes": 783404,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "sichuan-nv",
+      "name": {
+        "zh": "川渝 · 幺妹",
+        "en": "Sichuan · Yaomei"
+      },
+      "scene": "dialect",
+      "blurb": {
+        "zh": "亲切四川话女声",
+        "en": "Warm Sichuan-accented female voice"
+      },
+      "designDesc": "一位亲切的四川话女声，语气泼辣爽朗，像成都街头主播",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位亲切的四川话女声，语气泼辣爽朗，像成都街头主播",
+        "seed": 42
+      },
+      "url": "./sichuan-nv.wav",
+      "sha256": "a176b338589b2c871e0bc19922f1ebd9bcaf888f6e67414e8828e4647fbcfb00",
+      "bytes": 814124,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "tuokouxiu-nan",
+      "name": {
+        "zh": "喜剧 · 贫嘴",
+        "en": "Comedy · Pinzui"
+      },
+      "scene": "narration",
+      "blurb": {
+        "zh": "诙谐、节奏感强、爱抖包袱",
+        "en": "Witty, punchy stand-up style male voice"
+      },
+      "designDesc": "一位诙谐的中文男声，节奏感强，语气夸张生动，像脱口秀演员",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位诙谐的中文男声，节奏感强，语气夸张生动，像脱口秀演员",
+        "seed": 42
+      },
+      "url": "./tuokouxiu-nan.wav",
+      "sha256": "2dbf7a0d4476d1c8a13d9d29c2fe316a855ad4823249cf01e2f05e98add64f37",
+      "bytes": 921644,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "dashu-wennuan",
+      "name": {
+        "zh": "大叔 · 沉稳",
+        "en": "Uncle · Steady"
+      },
+      "scene": "podcast",
+      "blurb": {
+        "zh": "浑厚温暖的长者声线",
+        "en": "Warm, resonant middle-aged male voice"
+      },
+      "designDesc": "一位四十多岁的中文男声，声音浑厚温暖，像在炉边讲故事的旁白者",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位四十多岁的中文男声，声音浑厚温暖，像在炉边讲故事的旁白者",
+        "seed": 42
+      },
+      "url": "./dashu-wennuan.wav",
+      "sha256": "086806e7eb70d8e181809428e797e6f667b3461943771a22d52870fe03a840f3",
+      "bytes": 1121324,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "boke-nan",
+      "name": {
+        "zh": "播客 · 闲谈",
+        "en": "Podcast · Chat"
+      },
+      "scene": "podcast",
+      "blurb": {
+        "zh": "松弛对话感、像和朋友聊天",
+        "en": "Relaxed conversational male voice"
+      },
+      "designDesc": "一位放松自然的中文男声，像和朋友聊天，语气随和有呼吸感",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位放松自然的中文男声，像和朋友聊天，语气随和有呼吸感",
+        "seed": 42
+      },
+      "url": "./boke-nan.wav",
+      "sha256": "4784d8a1f7967e8826b656c917625ee885b5f544f48a47b70f77615510c4730a",
+      "bytes": 1090604,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "shaonv-yuanqi",
+      "name": {
+        "zh": "元气 · 跳跳",
+        "en": "Vlog · Tiaotiao"
+      },
+      "scene": "general",
+      "blurb": {
+        "zh": "元气满满、语速轻快",
+        "en": "Bubbly, fast-paced young female voice"
+      },
+      "designDesc": "一位元气满满的中文年轻女声，语速轻快，笑声感明显，像生活 vlog 博主",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位元气满满的中文年轻女声，语速轻快，笑声感明显，像生活 vlog 博主",
+        "seed": 42
+      },
+      "url": "./shaonv-yuanqi.wav",
+      "sha256": "0170a1311c911307a3c2117a71d3eb10e521d5a8533a5939957831e4a4d8d9bb",
+      "bytes": 937004,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "jiaocheng-nv",
+      "name": {
+        "zh": "教程 · 清晰姐",
+        "en": "Tutorial · Qingxi"
+      },
+      "scene": "general",
+      "blurb": {
+        "zh": "清晰利落、干脆利落",
+        "en": "Clear, crisp tutorial female voice"
+      },
+      "designDesc": "一位清晰利落的中文女声，咬字干脆，语速适中，像产品测评博主",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位清晰利落的中文女声，咬字干脆，语速适中，像产品测评博主",
+        "seed": 42
+      },
+      "url": "./jiaocheng-nv.wav",
+      "sha256": "2d0a7771207ed90433b3a00ad84e85393317621253a65fba5bf0479e26cbd022",
+      "bytes": 952364,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "lishi-nan",
+      "name": {
+        "zh": "历史 · 说书人",
+        "en": "History · Storyteller"
+      },
+      "scene": "narration",
+      "blurb": {
+        "zh": "苍劲说书腔",
+        "en": "Classic pingshu-style storyteller male voice"
+      },
+      "designDesc": "一位苍劲有力的中文男声，像评书演员，抑扬顿挫，娓娓道来",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位苍劲有力的中文男声，像评书演员，抑扬顿挫，娓娓道来",
+        "seed": 42
+      },
+      "url": "./lishi-nan.wav",
+      "sha256": "6acc00140498d0d6f1ea7fac746b946365e036d0c3909fbf50aeffa29c8fc071",
+      "bytes": 1059884,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "guanggao-nan",
+      "name": {
+        "zh": "广告 · 磁性嗓",
+        "en": "Ad · Magnetic"
+      },
+      "scene": "commerce",
+      "blurb": {
+        "zh": "深沉磁性、高级感",
+        "en": "Deep, magnetic premium ad male voice"
+      },
+      "designDesc": "一位深沉磁性的中文男声，语速偏慢，字字有力，像高端品牌广告旁白",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位深沉磁性的中文男声，语速偏慢，字字有力，像高端品牌广告旁白",
+        "seed": 42
+      },
+      "url": "./guanggao-nan.wav",
+      "sha256": "907d6461c22d2172702d1399dedf931cd2dc26eb7d9f94df21196aff8d79ed89",
+      "bytes": 1029164,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "xiaodidi",
+      "name": {
+        "zh": "少年 · 阳阳",
+        "en": "Teen · Yangyang"
+      },
+      "scene": "kids",
+      "blurb": {
+        "zh": "阳光少年音",
+        "en": "Sunny teenage male voice"
+      },
+      "designDesc": "一位十五六岁的中文少年声音，阳光开朗，朝气蓬勃",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位十五六岁的中文少年声音，阳光开朗，朝气蓬勃",
+        "seed": 42
+      },
+      "url": "./xiaodidi.wav",
+      "sha256": "3805c27ecb01ea861a26d8c0a2065ae7d264d5ad0f93ed1276fd427f093063ec",
+      "bytes": 998444,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    },
+    {
+      "id": "yeyin-tanci",
+      "name": {
+        "zh": "御姐 · 冷艳",
+        "en": "Belle · Lengyan"
+      },
+      "scene": "emotion",
+      "blurb": {
+        "zh": "冷艳御姐、慵懒中带锋利",
+        "en": "Cool, sharp, sultry female voice"
+      },
+      "designDesc": "一位冷艳的中文女声，语气慵懒中带着锋利，像都市剧中的御姐角色",
+      "version": "v1",
+      "promptText": "大家好，欢迎收听本期内容。今天我们聊聊第 3 个方法，其实它比你想的更简单——只要迈出第一步，剩下的就是坚持。",
+      "license": "Apache-2.0 (generated locally by VoxCPM2 via the Recut publish pipeline; no third-party voice)",
+      "source": {
+        "generator": "voxcpm2",
+        "designDesc": "一位冷艳的中文女声，语气慵懒中带着锋利，像都市剧中的御姐角色",
+        "seed": 42
+      },
+      "url": "./yeyin-tanci.wav",
+      "sha256": "4506ba9ae324107637d9434bb65c8210a52831bcb1b0f47c9ed6ad6f15d68b4e",
+      "bytes": 1228844,
+      "readback": {
+        "model": "qwen3-asr-0.6b",
+        "fidelity": 0.9783,
+        "transcript": "大家好欢迎收听本期内容今天我们聊聊第三个方法其实它比你想的更简单只要迈出第一步剩下的就是坚持",
+        "blocked": false
+      }
+    }
+  ]
+}

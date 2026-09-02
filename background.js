@@ -1,7 +1,7 @@
 /*
- * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务
- * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、配音合成（CosyVoice 或 VoxCPM 引擎/版本可选）、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材。audio.transcribe 扩了 saveToLibrary 开关（默认 false=私有产物不自动入库；true=终态懒入库为全局 transcript 素材并幂等去重，一次能力调用完成转写+入库）。转写/列表/详情/状态 op 已标记 capability，可被其他 App 经 ctx.capabilities.invoke 复用。
- * [POS]: audio-studio 的唯一业务后端；声音角色须通过质量验收，未选角色时使用 CosyVoice 官方默认声音进入 TTS，输出先停留在 App 文件沙箱，绝不生成时自动创建素材库 Asset（除 saveToLibrary:true 的显式授权）。
+ * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录，ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务，CDN 声音预设 manifest（经 audio_runner presets 子命令拉取，内置 bootstrap 兜底）
+ * [OUTPUT]: 注册环境检查、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、声音预设枚举（audio.presets）、预设参考音按需准备（audio.preset.prepare：缓存查 → CDN 下载 + sha256 校验 → 私有 preview URL，供 UI 免手动下载试听）、VoxCPM2 Voice Design / 预设实例化建角色（audio.character.design，origin=design/preset，saveToLibrary 懒入库并回填 assetId）、配音合成（CosyVoice 或 VoxCPM 引擎/版本可选，支持 presetId 参考音，与 characterId 互斥）、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材。audio.transcribe 扩了 saveToLibrary 开关（默认 false=私有产物不自动入库；true=终态懒入库为全局 transcript 素材并幂等去重，一次能力调用完成转写+入库）。转写/列表/详情/状态 op 已标记 capability，可被其他 App 经 ctx.capabilities.invoke 复用。
+ * [POS]: audio-studio 的唯一业务后端；声音角色须通过质量验收（design/preset 产物按回读验收入账，走同一任务中心），未选角色/预设时使用 CosyVoice 官方默认声音进入 TTS，输出先停留在 App 文件沙箱，绝不生成时自动创建素材库 Asset（除 saveToLibrary:true 的显式授权）。
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 
@@ -14,13 +14,38 @@ const DOWNLOAD_SOURCES = new Set(["automatic", "huggingface", "modelscope"]);
 const KINDS = new Set(["audio", "video"]);
 const LANGUAGES = new Set(["auto", "zh", "en"]);
 const STYLES = new Set(["neutral", "calm", "excited", "gentle"]);
-const ACTIONS = new Set(["prepare", "install", "transcribe", "character", "synthesize"]);
+const ACTIONS = new Set(["prepare", "install", "transcribe", "character", "design", "synthesize"]);
+// [preset-fallback:generated] 以下块由 python/publish_presets.py --sync 从 presets/catalog.json 再生成，勿手改。
+const PRESET_BOOTSTRAP_FALLBACK = [
+  {"id": "neutral-female", "name": {"zh": "小雅 · 中性女声", "en": "Xiaoya · Neutral Female"}, "scene": "general"},
+  {"id": "jieshuo-xiaoshuai", "name": {"zh": "解说 · 小帅风", "en": "Narrator · Xiaoshuai"}, "scene": "narration"},
+  {"id": "qinggan-nv", "name": {"zh": "情感 · 暖阳", "en": "Emotion · Warm Sun"}, "scene": "emotion"},
+  {"id": "xuanyi-nan", "name": {"zh": "悬疑 · 低语", "en": "Suspense · Undertone"}, "scene": "suspense"},
+  {"id": "tongsheng-nv", "name": {"zh": "童声 · 糖糖", "en": "Kid · Tangtang"}, "scene": "kids"},
+  {"id": "daihuo-nv", "name": {"zh": "带货 · 小燃", "en": "Live · Xiaoran"}, "scene": "commerce"},
+  {"id": "bobao-nan", "name": {"zh": "播报 · 正声", "en": "Anchor · Zhongsheng"}, "scene": "podcast"},
+  {"id": "zhixing-nv", "name": {"zh": "知性 · 静姝", "en": "Insight · Jingshu"}, "scene": "podcast"},
+  {"id": "dongbei", "name": {"zh": "东北 · 老铁", "en": "Dongbei · Laotie"}, "scene": "dialect"},
+  {"id": "yueyu-nan", "name": {"zh": "粤语 · 阿乐", "en": "Cantonese · Ah Lok"}, "scene": "dialect"},
+  {"id": "sichuan-nv", "name": {"zh": "川渝 · 幺妹", "en": "Sichuan · Yaomei"}, "scene": "dialect"},
+  {"id": "tuokouxiu-nan", "name": {"zh": "喜剧 · 贫嘴", "en": "Comedy · Pinzui"}, "scene": "narration"},
+  {"id": "dashu-wennuan", "name": {"zh": "大叔 · 沉稳", "en": "Uncle · Steady"}, "scene": "podcast"},
+  {"id": "boke-nan", "name": {"zh": "播客 · 闲谈", "en": "Podcast · Chat"}, "scene": "podcast"},
+  {"id": "shaonv-yuanqi", "name": {"zh": "元气 · 跳跳", "en": "Vlog · Tiaotiao"}, "scene": "general"},
+  {"id": "jiaocheng-nv", "name": {"zh": "教程 · 清晰姐", "en": "Tutorial · Qingxi"}, "scene": "general"},
+  {"id": "lishi-nan", "name": {"zh": "历史 · 说书人", "en": "History · Storyteller"}, "scene": "narration"},
+  {"id": "guanggao-nan", "name": {"zh": "广告 · 磁性嗓", "en": "Ad · Magnetic"}, "scene": "commerce"},
+  {"id": "xiaodidi", "name": {"zh": "少年 · 阳阳", "en": "Teen · Yangyang"}, "scene": "kids"},
+  {"id": "yeyin-tanci", "name": {"zh": "御姐 · 冷艳", "en": "Belle · Lengyan"}, "scene": "emotion"},
+];
+// [/preset-fallback:generated]
 const ACTIVE_JOB_STATUSES = new Set(["queued", "running"]);
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
 const RECORD_TABLES = {
   transcribe: "audio_transcripts",
   character: "audio_characters",
+  design: "audio_characters",
   synthesize: "audio_syntheses",
 };
 
@@ -35,7 +60,8 @@ function taskName(action, meta) {
   const m = meta || {};
   if (action === "transcribe") return `转写：${m.sourceAssetId || ""}`.trim();
   if (action === "character") return `创建声音角色：${m.characterName || ""}`.trim();
-  if (action === "synthesize") return `配音：${m.characterName || "默认音"}`;
+  if (action === "design") return `设计声音：${m.characterName || m.presetId || ""}`.trim();
+  if (action === "synthesize") return `配音：${m.characterName || (m.presetId ? `预设 ${m.presetId}` : "默认音")}`;
   if (action === "install") return `下载 ${m.model || ""}`.trim();
   if (action === "prepare") return "安装运行环境";
   return action;
@@ -203,12 +229,20 @@ function ensureSchema(ctx) {
   ensureColumn(ctx, "audio_transcripts", "saved_asset_id", "text not null default ''");
   ensureColumn(ctx, "audio_transcripts", "save_to_library", "integer not null default 0");
   ensureColumn(ctx, "audio_syntheses", "engine", "text not null default 'cosyvoice2'");
+  // 声音角色来源（RFC voice-presets D6）：clone(参考音上传) | design(Voice Design) | preset(由预设另存为用户角色)。
+  ensureColumn(ctx, "audio_characters", "origin", "text not null default 'clone'");
+  // design 产物 saveToLibrary:true 的懒入库标记（终态后幂等导入素材库并回填 assetId）。
+  ensureColumn(ctx, "audio_characters", "save_to_library", "integer not null default 0");
 }
 
 function ensureColumn(ctx, table, column, definition) {
   const columns = ctx.sqlite.query(`pragma table_info(${table})`);
   if (columns.some((row) => String(row.name) === column)) return;
-  ctx.sqlite.execute(`alter table ${table} add column ${column} ${definition}`);
+  try {
+    ctx.sqlite.execute(`alter table ${table} add column ${column} ${definition}`);
+  } catch (error) {
+    if (!String(error).includes("duplicate column name")) throw error;
+  }
 }
 
 function downloadSource(ctx) {
@@ -578,8 +612,92 @@ function characterCreate(input, ctx) {
   }
 }
 
+// audio.presets：声音预设清单（CDN manifest 权威源，bootstrap 兜底；只读无副作用，结果不落库）。
+// 经 audio_runner 的 presets 子命令拉取（urllib，10s 超时静默回退），Python 环境不可用时回退 JS 内置清单。
+function presets(_, ctx) {
+  const bootstrapPresets = PRESET_BOOTSTRAP_FALLBACK.map((entry) => ({ ...entry, blurb: {}, designDesc: "", version: "v1", source: "bootstrap", cached: false, cachedBytes: null }));
+  try {
+    const environment = ctx.python.status();
+    if (!environment.ready) return { presets: bootstrapPresets, source: "bootstrap", cdnReachable: false };
+    const result = run(ctx, ["presets"], 30);
+    if (!result.ready || !Array.isArray(result.presets) || !result.presets.length) throw new Error(result.error || "preset manifest unavailable");
+    return { presets: result.presets, version: result.version, source: result.source || "bootstrap", cdnReachable: result.cdnReachable === true };
+  } catch (_) {
+    return { presets: bootstrapPresets, source: "bootstrap", cdnReachable: false };
+  }
+}
+
+// audio.preset.prepare：按需把声音预设参考音准备到本地（缓存查 → CDN 下载 + sha256 校验），
+// 返回私有 preview URL 供 UI 试听；合成链路本身也走同一 resolve，因此提前准备可复用缓存。
+function presetPrepare(input, ctx) {
+  const presetId = value(input, "presetId");
+  if (!presetId) throw new Error(tr(ctx, "presetId 必填。", "presetId is required."));
+  const result = run(ctx, ["preset-prepare", "--preset-id", presetId], 300);
+  if (!result.ready) throw new Error(result.error || tr(ctx, "预设参考音准备失败。", "Failed to prepare the preset reference audio."));
+  return { presetId, previewURL: ctx.files.url(result.path), bytes: Number(result.bytes) || 0, version: result.version, promptText: result.promptText };
+}
+
+// audio.character.design：Voice Design / 预设实例化建角色（RFC voice-presets D3）。
+// presetId 分支零推理复制预设参考音；designDesc 分支由 voxcpm2 生成探针并回读验收。
+// 产物是 origin="design"/"preset" 的普通角色，与 clone 角色共用 audio.character.complete / audio.save。
+function characterDesign(input, ctx) {
+  ensureSchema(ctx);
+  const name = value(input, "name");
+  const designDesc = value(input, "designDesc");
+  const presetId = value(input, "presetId");
+  const model = value(input, "model") || "qwen3-asr-0.6b";
+  const saveToLibrary = input.saveToLibrary === true || String(input.saveToLibrary || "").trim().toLowerCase() === "true";
+  if (!name) throw new Error(tr(ctx, "name 必填。", "name is required."));
+  if (!designDesc && !presetId) throw new Error(tr(ctx, "designDesc 与 presetId 至少提供一个（二选一）。", "Provide either designDesc or presetId."));
+  if (designDesc && presetId) throw new Error(tr(ctx, "designDesc 与 presetId 互斥，请二选一。", "designDesc and presetId are mutually exclusive."));
+  if (designDesc && designDesc.length > 120) throw new Error(tr(ctx, "designDesc 不能超过 120 字。", "designDesc must be 120 characters or fewer."));
+  if (!ASR_MODELS.has(model)) throw new Error("model must be an ASR model");
+  ensureNoActiveJob(ctx);
+  const id = outputID();
+  const stem = `characters/${id}/sample`;
+  const origin = presetId ? "preset" : "design";
+  const record = { id, name, model, samplePath: `${stem}.wav`, sampleAssetId: "", promptText: "", origin, saveToLibrary, createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
+  ctx.sqlite.execute("insert into audio_characters (id, name, model, sample_path, sample_asset_id, prompt_text, origin, save_to_library, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.name, record.model, record.samplePath, record.sampleAssetId, record.promptText, record.origin, record.saveToLibrary ? 1 : 0, record.createdAt, record.jobId, record.status, record.error]);
+  const tid = outputID();
+  const logPath = taskLogPath(tid);
+  try {
+    const args = ["python/audio_runner.py", "design-character", "--name", name, "--model", model, "--output-relative", stem, "--task-log", logPath];
+    if (presetId) args.push("--preset-id", presetId);
+    else args.push("--design-desc", designDesc);
+    const job = ctx.python.run(args);
+    const meta = { type: "设计声音", model, characterName: name, origin, ...(presetId ? { presetId } : { designDesc: designDesc.slice(0, 40) }), saveToLibrary };
+    const tracked = trackJob(ctx, job, "design", id, { taskId: tid, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), meta });
+    record.jobId = shellJobID(tracked);
+    ctx.sqlite.execute("update audio_characters set job_id = ? where id = ?", [record.jobId, id]);
+    return { job: tracked, taskId: tid, character: { id, origin } };
+  } catch (error) {
+    markFailed(ctx, "design", id, error);
+    throw error;
+  }
+}
+
+// design/preset 角色的 saveToLibrary 懒终态：完成且要求入库但还没入库时，幂等补一次
+// audio.save 的 character 导入路径，并把 assetId 回填进任务 meta（World 链路依赖）。
+function finalizeSaveCharacterToLibrary(ctx, row) {
+  const flag = row.save_to_library === 1 || String(row.save_to_library || "").trim() === "1" || String(row.save_to_library || "").trim().toLowerCase() === "true";
+  if (!flag) return row.sample_asset_id || "";
+  if (row.sample_asset_id) return row.sample_asset_id;
+  if (row.status !== "completed" || !row.sample_path) return "";
+  const asset = ctx.media.importFile({ path: row.sample_path, name: `voice-character-${row.id}.wav`, mimeType: "audio/wav" });
+  ctx.sqlite.execute("update audio_characters set sample_asset_id = ? where id = ?", [asset.id, row.id]);
+  row.sample_asset_id = asset.id;
+  const tasks = ctx.sqlite.query("select id, meta_json from audio_tasks where record_id = ? order by created_at desc limit 1", [row.id]);
+  if (tasks.length) {
+    let meta = {};
+    try { meta = JSON.parse(tasks[0].meta_json || "{}"); } catch (_) { /* keep empty */ }
+    meta.characterAssetId = asset.id;
+    ctx.sqlite.execute("update audio_tasks set meta_json = ? where id = ?", [JSON.stringify(meta), tasks[0].id]);
+  }
+  return asset.id;
+}
+
 function characterRecord(ctx, row) {
-  const record = { id: row.id, name: row.name, model: row.model, promptText: row.prompt_text, sampleAssetId: row.sample_asset_id, createdAt: row.created_at, sampleURL: "" };
+  const record = { id: row.id, name: row.name, model: row.model, promptText: row.prompt_text, sampleAssetId: row.sample_asset_id, origin: row.origin || "clone", createdAt: row.created_at, sampleURL: "" };
   try { record.sampleURL = ctx.files.url(row.sample_path); }
   catch (error) {
     ctx.sqlite.execute("update audio_characters set status = 'failed', error = ? where id = ?", [error instanceof Error ? error.message : tr(ctx, "角色参考音已丢失。", "The character reference audio is missing."), row.id]);
@@ -590,6 +708,9 @@ function characterRecord(ctx, row) {
 
 function characterQuality(ctx, row) {
   const meta = readJSON(ctx, `${row.sample_path}.meta.json`);
+  // design/preset 产物没有克隆三件套（quality/speaker/calibration）；以回读验收/预设提示词为准。
+  const origin = String(row.origin || "clone");
+  if (origin === "design" || origin === "preset") return meta && meta.promptText && Number(meta.duration) > 0 ? meta : null;
   return meta?.quality?.passed === true && Number(meta?.speaker?.dimensions) > 0 && Number(meta?.calibration?.fidelity) >= 0.85 ? meta : null;
 }
 
@@ -597,29 +718,38 @@ function characterComplete(input, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
   const id = value(input, "id");
-  const rows = ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, created_at, status, error from audio_characters where id = ?", [id]);
+  const rows = ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, origin, save_to_library, created_at, status, error from audio_characters where id = ?", [id]);
   if (!rows.length) throw new Error("Audio character was not found.");
   const row = rows[0];
   if (row.status === "queued" || row.status === "") return { id: row.id, status: "queued" };
   const meta = readJSON(ctx, `${row.sample_path}.meta.json`);
-  if (row.status === "completed" && meta && meta.promptText && meta.quality?.passed === true && Number(meta.speaker?.dimensions) > 0 && Number(meta.calibration?.fidelity) >= 0.85) {
-    ctx.sqlite.execute("update audio_characters set prompt_text = ? where id = ?", [meta.promptText, id]);
-    row.prompt_text = meta.promptText;
+  if (row.status === "completed" && meta && meta.promptText) {
+    const origin = String(row.origin || "clone");
+    const clonePassed = meta.quality?.passed === true && Number(meta.speaker?.dimensions) > 0 && Number(meta.calibration?.fidelity) >= 0.85;
+    if (origin === "design" || origin === "preset" || clonePassed) {
+      ctx.sqlite.execute("update audio_characters set prompt_text = ? where id = ?", [meta.promptText, id]);
+      row.prompt_text = meta.promptText;
+    }
   }
   if (row.status === "completed" && !characterQuality(ctx, row)) {
     const qualityError = tr(ctx, "声音角色未通过参考音、声纹或朗读回读验收，请重新创建。", "The voice character did not pass the reference, voiceprint or read-back verification. Please create it again.");
     ctx.sqlite.execute("update audio_characters set status = 'failed', error = ? where id = ?", [qualityError, id]);
     return { id: row.id, status: "failed", error: qualityError };
   }
+  let savedAssetId = row.sample_asset_id || "";
+  try { savedAssetId = finalizeSaveCharacterToLibrary(ctx, row) || savedAssetId; } catch (_) { /* 入库失败不阻断读取，可由 audio.save 重试 */ }
   const record = characterRecord(ctx, row);
   if (!record) throw new Error("Audio character sample is missing.");
-  return { ...record, status: row.status, error: row.error || "" };
+  return { ...record, status: row.status, error: row.error || "", characterAssetId: savedAssetId };
 }
 
 function characters(_, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
-  return ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, created_at from audio_characters where status = 'completed' order by created_at desc").filter((row) => characterQuality(ctx, row)).map((row) => characterRecord(ctx, row)).filter(Boolean);
+  return ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, origin, save_to_library, created_at from audio_characters where status = 'completed' order by created_at desc").filter((row) => characterQuality(ctx, row)).map((row) => {
+    try { finalizeSaveCharacterToLibrary(ctx, row); } catch (_) { /* 入库失败不阻断列表，保留私有产物 */ }
+    return characterRecord(ctx, row);
+  }).filter(Boolean);
 }
 
 function characterRemove(input, ctx) {
@@ -635,14 +765,16 @@ function characterRemove(input, ctx) {
 function synthesize(input, ctx) {
   ensureSchema(ctx);
   const characterID = value(input, "characterId");
+  const presetId = value(input, "presetId");
   const text = value(input, "text");
   const style = value(input, "style") || "neutral";
   const engine = value(input, "engine") || "cosyvoice2";
   if (!text) throw new Error("text is required");
   if (!ENGINES.has(engine)) throw new Error("engine must be cosyvoice2, voxcpm2, voxcpm1.5 or voxcpm-0.5b");
   if (!STYLES.has(style)) throw new Error("style must be neutral, calm, excited, or gentle");
+  if (presetId && characterID) throw new Error(tr(ctx, "presetId 与 characterId 互斥，二者不可同时传入。", "presetId and characterId are mutually exclusive."));
   const isVoxCpm = VOXCPM_MODELS.includes(engine);
-  if (isVoxCpm && !characterID && engine !== "voxcpm2") throw new Error("VoxCPM1.5 / VoxCPM-0.5B use continuation cloning and need a voice character.");
+  if (isVoxCpm && !characterID && !presetId && engine !== "voxcpm2") throw new Error("VoxCPM1.5 / VoxCPM-0.5B use continuation cloning and need a voice character.");
   ensureNoActiveJob(ctx);
   const characters = characterID ? ctx.sqlite.query("select id, sample_path, prompt_text from audio_characters where id = ? and status = 'completed'", [characterID]).filter((row) => characterQuality(ctx, row)) : [];
   if (characterID && !characters.length) throw new Error("Selected voice character was not found.");
@@ -656,9 +788,10 @@ function synthesize(input, ctx) {
   try {
     const args = ["python/audio_runner.py", "synthesize", "--text", text, "--style", style, "--engine", engine, "--output", outputPath, "--task-log", logPath];
     if (characterID) args.push("--reference", character.sample_path, "--prompt-text", character.prompt_text);
+    else if (presetId) args.push("--preset-id", presetId);
     else args.push("--default-voice");
     const job = ctx.python.run(args);
-    const tracked = trackJob(ctx, job, "synthesize", id, { taskId: tid, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), meta: { type: "配音合成", engine, characterId: characterID, characterName: character.name } });
+    const tracked = trackJob(ctx, job, "synthesize", id, { taskId: tid, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), meta: { type: "配音合成", engine, characterId: characterID, characterName: character.name, ...(presetId ? { presetId } : {}) } });
     record.jobId = shellJobID(tracked);
     ctx.sqlite.execute("update audio_syntheses set job_id = ? where id = ?", [record.jobId, id]);
     return { job: tracked, taskId: tid, synthesis: { id } };
@@ -794,6 +927,9 @@ recut.operation.register("audio.transcribe", transcribe);
 recut.operation.register("audio.transcripts", transcripts);
 recut.operation.register("audio.transcript", transcript);
 recut.operation.register("audio.character.create", characterCreate);
+recut.operation.register("audio.presets", presets);
+recut.operation.register("audio.preset.prepare", presetPrepare);
+recut.operation.register("audio.character.design", characterDesign);
 recut.operation.register("audio.character.complete", characterComplete);
 recut.operation.register("audio.characters", characters);
 recut.operation.register("audio.character.remove", characterRemove);

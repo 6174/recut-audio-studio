@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-[INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、主 ASR venv、CosyVoice 专属官方 venv、VoxCPM 专属 venv、模型权重与 FFmpeg
-[OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备与合成进度，并在底层模型静默时每 8 秒输出心跳；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、经连续语音/波形/声纹验收的 16k 角色参考音与合成 wav
-[POS]: audio-studio 的本地执行入口；实现 VoiceCloneEngine 的参考音预处理、片段筛选、质量验收和合成后 ASR 回读；CosyVoice 与 VoxCPM 推理通过各自专属 worker 隔离版本冲突，不写入素材库
+ [INPUT]: 读取 RECUT_APP_FILES_DIR、RECUT_MODELS_DIR、主 ASR venv、CosyVoice 专属官方 venv、VoxCPM 专属 venv、模型权重、FFmpeg 与 CDN 声音预设 manifest（https://cdn.recut.video/audio-studio/voices，内置 bootstrap 清单兜底）
+[OUTPUT]: 输出单行 JSON 状态；实时报告模型下载、转写、角色准备、声音设计（Voice Design）与合成进度，并在底层模型静默时每 8 秒输出心跳；在 App 私有 files/ 中生成 transcript.json/.srt 文稿字幕、经连续语音/波形/声纹验收的 16k 角色参考音、按需 resolve 缓存的声音预设参考音（presets/<version>/，sha256 校验 + cache.json 账本）与合成 wav
+[POS]: audio-studio 的本地执行入口；实现 VoiceCloneEngine 的参考音预处理、片段筛选、质量验收和合成后 ASR 回读；声音预设 resolve（缓存 → CDN 下载）与 VoxCPM2 Voice Design 建角色零/低推理落为角色私有参考音；CosyVoice 与 VoxCPM 推理通过各自专属 worker 隔离版本冲突，不写入素材库
 [PROTOCOL]: 变更时更新此头部，然后检查 README.md
 """
 
@@ -110,6 +110,25 @@ STYLES = {
     "excited": "兴奋",
     "gentle": "温柔",
 }
+# 声音预设：单一信息源是包内 presets/catalog.json（改动只改它）；catalog 权威发布源在 CDN
+# （RFC voice-presets D1/D9），内置清单仅离线兜底（无音频）。RECUT_PRESETS_CDN 可覆盖测试。
+PRESETS_CDN_BASE = os.environ.get("RECUT_PRESETS_CDN", "https://cdn.recut.video/voices").rstrip("/")
+
+def _load_preset_catalog() -> dict:
+    path = Path(__file__).resolve().parent.parent / "presets" / "catalog.json"
+    with path.open("r", encoding="utf-8") as handle:
+        return json.loads(handle.read())
+
+PRESET_CATALOG = _load_preset_catalog()
+PRESETS_BOOTSTRAP_VERSION = str(PRESET_CATALOG.get("version") or "v1")
+PRESET_BOOTSTRAP = [
+    {"id": item["id"], "name": item["name"], "scene": item["scene"], "blurb": item["blurb"], "designDesc": item["designDesc"]}
+    for item in PRESET_CATALOG.get("presets", [])
+]
+# design-character 探针文本（单一信息源：presets/catalog.json 的 probeText）。
+PROBE_TEXT = str(PRESET_CATALOG.get("probeText") or "")
+# 最近一次 manifest 拉取是否走了 CDN（仅反映缓存结果，供 status() 轻量展示，不做网络阻塞调用）。
+_last_cdn_reachable = False
 
 
 def model_root() -> Path:
@@ -512,11 +531,14 @@ def state(root: Path) -> dict:
             "ready": voxcpm_runtime["ready"] and any(voxcpm_models[version]["downloaded"] for version in VOXCPM_MODELS),
         },
     }
+    preset_cache = read_preset_cache().get("presets") or {}
+    preset_cached = sorted(pid for pid, record in preset_cache.items() if isinstance(record, dict) and record.get("version") and preset_wav_path(str(record["version"]), pid).is_file())
     return {
         "ready": not problems,
         "modelsRoot": str(root),
         "pythonVersion": f"{sys.version_info.major}.{sys.version_info.minor}",
         "asr": {"installed": installed, "qwenRuntime": qwen_runtime_ready},
+        "presets": {"cdnReachable": _last_cdn_reachable, "cached": preset_cached},
         "tts": {"repository": repository_ready, "model": model_ready, "runtime": tts_runtime["ready"], "verification": DEFAULT_VERIFICATION_MODEL in installed, "versions": tts_runtime.get("versions", {}), "ready": repository_ready and model_ready and tts_runtime["ready"] and DEFAULT_VERIFICATION_MODEL in installed, "engines": engines},
         "error": " ".join(problems),
     }
@@ -880,6 +902,247 @@ def prepare_character(model_id: str, source_relative: str, stem_relative: str) -
     emit({"ready": True, **meta})
 
 
+# ---------------------------------------------------------------------------
+# 声音预设（RFC voice-presets D1/D2/D9）：catalog 权威源在 CDN，bootstrap 清单
+# 仅离线兜底；参考音按版本缓存到 App 私有文件区，账本 presets/cache.json。
+# ---------------------------------------------------------------------------
+
+def presets_dir(version: str) -> Path:
+    return files_root() / "presets" / version
+
+
+def presets_ledger_path() -> Path:
+    return files_root() / "presets" / "cache.json"
+
+
+def read_preset_cache() -> dict:
+    try:
+        data = json.loads(presets_ledger_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_preset_cache(cache: dict) -> None:
+    path = presets_ledger_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def fetch_url_json(url: str, timeout: int = 10):
+    import urllib.request
+
+    # CDN（Cloudflare）会 403 掉空的默认 UA（Python-urllib/3.x），显式带 UA。
+    request = urllib.request.Request(url, headers={"User-Agent": "RecutAudioStudio/1.0"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_preset_manifest() -> tuple[dict, str]:
+    """返回 (manifest, source)。CDN 版本指针 → 版本 manifest；任何失败静默回退 bootstrap。"""
+    global _last_cdn_reachable
+    try:
+        pointer = fetch_url_json(f"{PRESETS_CDN_BASE}/manifest.json")
+        version = str((pointer or {}).get("version") or "").strip()
+        if version:
+            manifest = fetch_url_json(f"{PRESETS_CDN_BASE}/{version}/manifest.json")
+            if str((manifest or {}).get("version") or "") == version and isinstance(manifest.get("presets"), list):
+                _last_cdn_reachable = True
+                return manifest, "manifest"
+    except Exception as error:
+        print(f"[audio] 声音预设 CDN manifest 不可用（{error}），回退内置清单。", flush=True)
+    _last_cdn_reachable = False
+    return {"version": PRESETS_BOOTSTRAP_VERSION, "presets": PRESET_BOOTSTRAP}, "bootstrap"
+
+
+def sha256_of_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def preset_wav_path(version: str, preset_id: str) -> Path:
+    return presets_dir(version) / f"{preset_id}.wav"
+
+
+def cached_preset_record(preset_id: str) -> tuple[dict, Path]:
+    """账本里有记录且对应 wav 文件仍存在时返回 (record, wav path)，否则 ({}, None)。"""
+    record = (read_preset_cache().get("presets") or {}).get(preset_id)
+    if not isinstance(record, dict) or not record.get("version"):
+        return {}, None
+    wav = preset_wav_path(str(record["version"]), preset_id)
+    return (record, wav) if wav.is_file() else ({}, None)
+
+
+def download_preset_wav(entry: dict, version: str) -> Path:
+    """按 manifest 条目下载参考音到版本缓存目录（含 sha256 校验，不符即删并报错）。"""
+    preset_id = str(entry.get("id") or "")
+    url = str(entry.get("url") or "").strip()
+    if not preset_id or not url:
+        raise RuntimeError(f"预设 {preset_id} 的 manifest 条目缺少下载地址。")
+    if not re.match(r"^https?://", url):
+        url = f"{PRESETS_CDN_BASE}/{version}/{url.lstrip('./')}"
+    wav = preset_wav_path(version, preset_id)
+    wav.parent.mkdir(parents=True, exist_ok=True)
+    expected = int(entry.get("bytes") or 0)
+    print(f"[audio] 正在下载预设 {preset_id} 参考音（{version}）。", flush=True)
+    resumable_download(url, wav, expected_size=expected, attempts=3)
+    sha256 = str(entry.get("sha256") or "").lower()
+    actual = sha256_of_file(wav)
+    if sha256 and actual != sha256:
+        wav.unlink(missing_ok=True)
+        raise RuntimeError(f"预设 {preset_id} 参考音 sha256 校验失败（{actual[:12]}…），已删除该文件，请稍后重试。")
+    print(f"[audio] 预设 {preset_id} 参考音已下载并通过校验。", flush=True)
+    return wav
+
+
+def remember_preset_cache(entry: dict, version: str, wav: Path) -> None:
+    cache = read_preset_cache()
+    presets = cache.setdefault("presets", {})
+    presets[str(entry.get("id"))] = {
+        "sha256": str(entry.get("sha256") or sha256_of_file(wav)),
+        "bytes": wav.stat().st_size,
+        "fetchedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "version": version,
+        "promptText": str(entry.get("promptText") or ""),
+    }
+    cache["manifestVersion"] = version
+    cache["fetchedAt"] = presets[str(entry.get("id"))]["fetchedAt"]
+    write_preset_cache(cache)
+
+
+def resolve_preset(preset_id: str) -> dict:
+    """缓存查 → CDN 下载（sha256 校验）→ 版本化缓存；返回 {wav, promptText, version}。
+
+    离线时已缓存条目永远可用（promptText 记在账本里）；未缓存条目报可读错误。
+    """
+    if not preset_id:
+        raise RuntimeError("presetId is required")
+    # 快路径：账本有完整记录且 wav 在盘上时直接复用，避免每次都拉 manifest。
+    record, cached = cached_preset_record(preset_id)
+    if cached is not None and str(record.get("promptText") or ""):
+        return {"wav": cached, "promptText": str(record["promptText"]), "version": str(record.get("version") or PRESETS_BOOTSTRAP_VERSION)}
+    manifest, source = fetch_preset_manifest()
+    version = str(manifest.get("version") or PRESETS_BOOTSTRAP_VERSION)
+    entries = manifest.get("presets") if isinstance(manifest.get("presets"), list) else []
+    entry = next((item for item in entries if str(item.get("id") or "") == preset_id), None)
+    record, cached = cached_preset_record(preset_id)
+    if entry is not None and str(entry.get("version") or version):
+        entry_version = str(entry.get("version") or version)
+        prompt_text = str(entry.get("promptText") or "")
+        wav = preset_wav_path(entry_version, preset_id)
+        if wav.is_file() and (prompt_text or not entry.get("sha256")):
+            # 已缓存即用；sha256 与账本一致或无强校验要求时直接复用（参考音极小，不重复校验）。
+            ledger = (read_preset_cache().get("presets") or {}).get(preset_id) or {}
+            if not entry.get("sha256") or str(ledger.get("sha256") or "").lower() == str(entry["sha256"]).lower():
+                if not prompt_text:
+                    prompt_text = str(record.get("promptText") or "")
+                if prompt_text:
+                    return {"wav": wav, "promptText": prompt_text, "version": entry_version}
+        if entry.get("url") and entry.get("sha256"):
+            wav = download_preset_wav(entry, entry_version)
+            remember_preset_cache(entry, entry_version, wav)
+            prompt_text = str(entry.get("promptText") or "") or str(record.get("promptText") or "")
+            if not prompt_text:
+                raise RuntimeError(f"预设 {preset_id} 的 manifest 缺少 promptText，无法作为参考音使用。")
+            return {"wav": wav, "promptText": prompt_text, "version": entry_version}
+    # CDN 不可达（bootstrap）或条目不完整：仅已缓存条目可用。
+    if cached is not None and str(record.get("promptText") or ""):
+        print(f"[audio] 预设 {preset_id} 使用本地缓存（{record.get('version')}）。", flush=True)
+        return {"wav": cached, "promptText": str(record["promptText"]), "version": str(record.get("version") or version)}
+    if source == "manifest":
+        raise RuntimeError(f"预设 {preset_id} 不在当前 manifest（{version}）中，且没有可用缓存。")
+    raise RuntimeError(f"预设 {preset_id} 尚未缓存且 CDN 不可达，请联网后重试。")
+
+
+def design_character(output_relative: str, preset_id: str = "", design_desc: str = "", model_id: str = DEFAULT_VERIFICATION_MODEL) -> None:
+    """Voice Design 建角色：presetId 分支零推理复制预设参考音；designDesc 分支由
+    VoxCPM2 生成探针 → 波形检查 → ASR 回读验收（≥0.85）→ 落为角色私有参考音。"""
+    if bool(preset_id) == bool(design_desc.strip()):
+        emit({"ready": False, "error": "design-character 需要 --preset-id 或 --design-desc 二选一。"}, 1)
+    output = safe_file(output_relative)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    origin = "preset" if preset_id else "design"
+    try:
+        if preset_id:
+            resolved = resolve_preset(preset_id)
+            print(f"[audio] 预设 {preset_id} 已就绪（{resolved['version']}），正在复制为角色参考音。", flush=True)
+            shutil.copyfile(resolved["wav"], output)
+            prompt_text = resolved["promptText"]
+            meta_extra = {"presetId": preset_id, "presetVersion": resolved["version"]}
+        else:
+            print(f"[audio] 正在用 VoxCPM2 Voice Design 生成声音探针（描述：{design_desc}）。", flush=True)
+            result = run_voxcpm_worker([
+                "synthesize", "--version", "voxcpm2",
+                "--model-dir", str(voxcpm_model("voxcpm2")),
+                "--voice-design", "--design-desc", design_desc, "--seed", "42",
+                "--text", PROBE_TEXT, "--output", str(output),
+            ])
+            if not output.is_file() or probe_duration(output) < 1.0:
+                raise RuntimeError("Voice Design 探针未通过波形质量检查。")
+            print("[audio] 探针已生成，开始 Qwen3-ASR 回读验收。", flush=True)
+            transcript = transcribe_for_quality(model_id, output)
+            fidelity = text_similarity(PROBE_TEXT, transcript)
+            print(f"[audio] 声音设计回读保真度 {fidelity:.2f}。", flush=True)
+            if fidelity < MIN_TEXT_FIDELITY:
+                raise RuntimeError(f"声音设计回读未通过（{fidelity:.2f}/{MIN_TEXT_FIDELITY:.2f}），未产出该角色。")
+            prompt_text = transcript
+            meta_extra = {"designDesc": design_desc, "fidelity": round(fidelity, 4), "seed": 42}
+        duration = probe_duration(output)
+        sample_rate = 0
+        try:
+            import soundfile as sf
+
+            sample_rate = int(sf.info(str(output)).samplerate)
+        except Exception:
+            sample_rate = 0
+        meta = {"origin": origin, "promptText": prompt_text, "duration": round(duration, 3), "sampleRate": sample_rate, **meta_extra}
+        Path(str(output) + ".meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[audio] 声音角色（{origin}）已就绪（{duration:.1f}s）。", flush=True)
+        emit({"ready": True, "duration": meta["duration"], "sampleRate": sample_rate, "promptText": prompt_text, "origin": origin})
+    except Exception as error:
+        output.unlink(missing_ok=True)
+        Path(str(output) + ".meta.json").unlink(missing_ok=True)
+        emit({"ready": False, "error": str(error)}, 1)
+
+
+def list_presets() -> None:
+    """audio.presets 的执行面：CDN manifest（10s 超时失败回退 bootstrap）+ 本地缓存状态，不落库。"""
+    manifest, source = fetch_preset_manifest()
+    version = str(manifest.get("version") or PRESETS_BOOTSTRAP_VERSION)
+    cache = read_preset_cache()
+    entries = []
+    for entry in manifest.get("presets") if isinstance(manifest.get("presets"), list) else []:
+        preset_id = str(entry.get("id") or "")
+        if not preset_id:
+            continue
+        record, cached = cached_preset_record(preset_id)
+        entries.append({
+            "id": preset_id,
+            "name": entry.get("name") or {"zh": preset_id, "en": preset_id},
+            "scene": str(entry.get("scene") or "general"),
+            "blurb": entry.get("blurb") or {},
+            "designDesc": str(entry.get("designDesc") or ""),
+            "version": str(entry.get("version") or version),
+            "source": source,
+            "cached": cached is not None,
+            "cachedBytes": int(record.get("bytes") or 0) if cached is not None else None,
+        })
+    emit({"ready": True, "presets": entries, "version": version, "source": source, "cdnReachable": source == "manifest"})
+
+
+def prepare_preset(preset_id: str) -> None:
+    """audio.preset.prepare 的执行面：缓存查 → CDN 下载（sha256 校验）→ 返回相对路径供 preview URL。"""
+    resolved = resolve_preset(preset_id)
+    wav = Path(resolved["wav"])
+    relative = wav.relative_to(files_root()).as_posix()
+    emit({"ready": True, "presetId": preset_id, "path": relative, "bytes": wav.stat().st_size, "promptText": resolved["promptText"], "version": resolved["version"]})
+
+
 def synthesize_voxcpm(engine: str, current: dict, text: str, reference_relative: str, prompt_text: str, default_voice: bool, output: Path) -> dict:
     voxcpm = current["tts"]["engines"]["voxcpm"]
     if not voxcpm["runtime"]:
@@ -904,13 +1167,21 @@ def synthesize_voxcpm(engine: str, current: dict, text: str, reference_relative:
     return run_voxcpm_worker(args)
 
 
-def synthesize(text: str, reference_relative: str, prompt_text: str, style: str, output_relative: str, default_voice: bool = False, engine: str = "cosyvoice2") -> None:
+def synthesize(text: str, reference_relative: str, prompt_text: str, style: str, output_relative: str, default_voice: bool = False, engine: str = "cosyvoice2", preset_id: str = "") -> None:
     current = state(model_root())
     if DEFAULT_VERIFICATION_MODEL not in current["asr"]["installed"]:
         emit({"ready": False, "error": "缺少 Qwen3-ASR 0.6B，无法执行合成后文本回读验收。"}, 1)
+    if preset_id and (reference_relative or default_voice):
+        emit({"ready": False, "error": "presetId 与 characterId 互斥，二者不可同时传入。"}, 1)
     output = safe_file(output_relative)
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
+        if preset_id:
+            resolved = resolve_preset(preset_id)
+            reference_relative = str(resolved["wav"].relative_to(files_root()))
+            prompt_text = resolved["promptText"]
+            default_voice = False
+            print(f"[audio] 已解析声音预设 {preset_id}（{resolved['version']}）作为参考音。", flush=True)
         if engine in VOXCPM_MODELS:
             rendered = synthesize_voxcpm(engine, current, text, reference_relative, prompt_text, default_voice, output)
             print(f"[audio] 使用{VOXCPM_META[engine]['label']}：{'Voice Design 默认音' if default_voice else '经验证声音角色'}。", flush=True)
@@ -931,7 +1202,7 @@ def synthesize(text: str, reference_relative: str, prompt_text: str, style: str,
             rendered = run_cosyvoice_worker(["synthesize", "--model-dir", str(model_dir), "--reference", str(reference), "--prompt-text", prompt_text, "--text", text, "--output", str(output)])
         print("[audio] WAV 已生成，开始单次 Qwen3-ASR 回读验收。", flush=True)
         verification = verify_spoken_text(DEFAULT_VERIFICATION_MODEL, output, text, "合成输出")
-        meta = {"wav": str(output.relative_to(files_root())), "duration": rendered["duration"], "sampleRate": rendered["sampleRate"], "style": style, "engine": engine, "verification": verification}
+        meta = {"wav": str(output.relative_to(files_root())), "duration": rendered["duration"], "sampleRate": rendered["sampleRate"], "style": style, "engine": engine, "verification": verification, **({"presetId": preset_id} if preset_id else {})}
         Path(str(output) + ".meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[audio] 合成与回读验收完成：{meta['duration']:.1f} 秒，保真度 {verification['fidelity']:.2f}。", flush=True)
         emit({"ready": True, **meta})
@@ -962,12 +1233,22 @@ def main() -> None:
     synthesize_parser.add_argument("--reference", default="")
     synthesize_parser.add_argument("--prompt-text", default="")
     synthesize_parser.add_argument("--default-voice", action="store_true")
+    synthesize_parser.add_argument("--preset-id", default="")
     synthesize_parser.add_argument("--style", choices=list(STYLES), default="neutral")
     synthesize_parser.add_argument("--engine", choices=["cosyvoice2"] + VOXCPM_MODELS, default="cosyvoice2")
     synthesize_parser.add_argument("--output", required=True)
+    design_parser = commands.add_parser("design-character")
+    design_parser.add_argument("--name", required=True)
+    design_parser.add_argument("--preset-id", default="")
+    design_parser.add_argument("--design-desc", default="")
+    design_parser.add_argument("--model", choices=ASR_MODELS, default=DEFAULT_VERIFICATION_MODEL)
+    design_parser.add_argument("--output-relative", required=True)
+    presets_parser = commands.add_parser("presets")
+    prepare_parser = commands.add_parser("preset-prepare")
+    prepare_parser.add_argument("--preset-id", required=True)
     # 任务日志输出必须挂在每个子命令 parser 上（argparse 子命令之后的选项不会回落到主 parser）；
     # background 传递的用法是 `audio_runner.py <subcommand> ... --task-log tasks/<id>.log`。
-    for sub in (install_parser, transcribe_parser, character_parser, synthesize_parser):
+    for sub in (install_parser, transcribe_parser, character_parser, synthesize_parser, design_parser):
         sub.add_argument("--task-log", default="", help="可选：把进度同时以 JSON-lines 追加到该文件，供任务中心回看日志")
     args = parser.parse_args()
 
@@ -998,7 +1279,13 @@ def main() -> None:
         elif args.command == "character":
             prepare_character(args.model, args.input, args.output)
         elif args.command == "synthesize":
-            synthesize(args.text, args.reference, args.prompt_text, args.style, args.output, args.default_voice, args.engine)
+            synthesize(args.text, args.reference, args.prompt_text, args.style, args.output, args.default_voice, args.engine, args.preset_id)
+        elif args.command == "design-character":
+            design_character(args.output_relative, args.preset_id, args.design_desc, args.model)
+        elif args.command == "presets":
+            list_presets()
+        elif args.command == "preset-prepare":
+            prepare_preset(args.preset_id)
     except SystemExit:
         raise
     except Exception as error:

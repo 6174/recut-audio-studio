@@ -15,7 +15,7 @@
 
 # RFC: 声音预设库（20 个默认角色）与 VoxCPM2 Voice Design 声音设计能力
 
-- 状态：**草案（待评审）**
+- 状态：**已采纳（实施中）**
 - 作者：Recut
 - 日期：2026-09-02
 - 决策范围：默认声音角色库的内容与来源、预设的引擎无关实现、`audio.character.design` 新 op（UI + MCP 双面）、与 Creation Worlds `voice_reference` 证据的打通、数据契约、验收与分阶段实施
@@ -331,3 +331,21 @@ audio.synthesize（修改）
 - **不做声音风格化参数 UI**（语速/音高滑杆）：Voice Design 描述已承担风格表达，参数化留给后续 RFC。
 - **不改平台 worlds 契约**：voice_reference 证据角色已存在，本 RFC 只产出合规 asset。
 - **不做多语言预设**：首批 20 个全部中文优先；英文/其他语种预设待验收链路支持后另议（见 VoxCPM RFC §12 风险 3）。
+
+## 13. 实施记录
+
+- **Phase 0/1/2 已完成**：
+  - `voxcpm_runner.py` 的 `--design-desc` / `--seed` 参数化（替换 `VOXCPM_DESIGN_DESC` 硬编码），并冒烟通过。
+  - 官方发布脚本 `python/publish_presets.py`：voxcpm2 批量生成探针 → 离线 ASR 回读验收 → 产出 `publish/presets/<version>/`（manifest.json + WAV）。
+  - `audio_runner.py` / `background.js` / `manifest.json`：新 op `audio.presets`（api+mcp，CDN catalog → bootstrap 兜底）、`audio.character.design`（api+mcp，presetId 分支零推理、designDesc 分支 voxcpm2 生成 + ASR 回读验收）；`audio.synthesize` 新增可选 `presetId`（与 characterId 互斥）；`audio_characters` 加 `origin` 列（clone|design|preset）；预设参考音按需从 CDN `https://cdn.recut.video/audio-studio/voices` resolve 到本地版本化缓存。
+  - UI：`voice.tsx` 预设页签与设计声音弹框。
+- **Phase 0 定稿**：20 条 designDesc 已批量生成完毕（20/20 回读保真度 0.9783，约 19MB）；待实听后如需微调，改 `presets/catalog.json` 的 designDesc、删对应 wav 重跑发布并升版本号。
+- **待办**：真机端到端验证（§10 L3，App 内实听与整链路）。
+- **偏离决定（来自实现）**：
+  1. `designDesc` 与 `presetId` 同时传时直接报错（未实现「presetId + designDesc 覆写描述」的覆写分支，校验收紧为严格二选一）。
+  2. `audio.presets` 的 CDN manifest 拉取在 runner 的 `presets` 子命令内完成（而非 background.js 层）。
+  3. 预设缓存账本 `cache.json` 在 RFC §D6 字段外额外记录 `version` 与每条预设的 `promptText`（resolve 离线复用无需重拉 manifest）。
+- **Phase 3（单一信息源 + CDN 发布，已完成）**：
+  - 单一信息源是包内 `apps/audio-studio/presets/catalog.json`（version/probeText/license + 20 条预设的 id/双语名/scene/blurb/designDesc）。`audio_runner.py`（bootstrap 清单 + PROBE_TEXT）与 `publish_presets.py` 均从它加载；`background.js` 的 JS 兜底清单由 `publish_presets.py --sync` 在标记块 `[preset-fallback:generated]` 内再生成（ctx.files 读不到包内文件，故运行时兜底仍内联）。
+  - CDN 路径改为仓库桶约定 `https://cdn.recut.video/voices/`（`cdn/buckets/voices/` 本地暂存：版本目录 + `manifest.json` 版本指针；`make voices-upload` 经 `cdn/scripts/cli.mjs` 增量上传 R2 并 purge 指针缓存）。runner 支持 `RECUT_PRESETS_CDN` 环境变量覆盖用于本地端到端测试（已验证：本地 http 服务 → presets 列表 source=manifest、design-character --preset-id 零推理下载 + sha256 校验通过）。
+  - v1 已上传生产 CDN（23/23 对象，`make voices-upload`）并完成线上端到端验证：`design-character --preset-id` 从 `cdn.recut.video/voices/v1/` 下载 + sha256 校验 + 零推理合成通过。期间发现并修复：Cloudflare 会 403 掉 urllib 默认空 UA，`fetch_url_json` 已显式带 `User-Agent`。Cache purge 需 `CLOUDFLARE_API_TOKEN`（Zone.Cache Purge 权限），未配置时仅指针缓存刷新不可用，不影响功能。
