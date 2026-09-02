@@ -168,12 +168,55 @@ def display_size(size: float) -> str:
     return f"{size / (1024 * 1024):.1f} MiB"
 
 
+def resumable_download(url: str, dest: Path, expected_size: int = 0, attempts: int = 8) -> None:
+    """流式下载到 dest.tmp，带读超时、断点续传与卡死重试。hf_hub_download 的流式读取
+    没有读超时，连接僵死时会永久挂起，这里自己实现以避免静默卡死。"""
+    import requests as requests_lib
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+    read_timeout = 30
+    for attempt in range(1, attempts + 1):
+        done = part.stat().st_size if part.exists() else 0
+        if expected_size and done >= expected_size:
+            break
+        headers = {"Range": f"bytes={done}-"} if done else {}
+        try:
+            started = time.monotonic()
+            last_report = 0.0
+            with requests_lib.get(url, headers=headers, stream=True, timeout=(10, read_timeout)) as response:
+                if response.status_code == 416:
+                    break
+                response.raise_for_status()
+                mode = "ab" if (done and response.status_code == 206) else "wb"
+                with part.open(mode) as sink:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        sink.write(chunk)
+                        now = time.monotonic()
+                        if now - last_report >= 15:
+                            current = part.stat().st_size
+                            speed = (current - done) / max(now - started, 0.001) / (1024 * 1024)
+                            print(f"[audio] {dest.name} 已下载 {display_size(current)}（{speed:.1f} MiB/s）。", flush=True)
+                            last_report = now
+            break
+        except (requests_lib.RequestException, OSError) as error:
+            kept = part.stat().st_size if part.exists() else 0
+            if attempt >= attempts:
+                raise RuntimeError(f"{dest.name} 下载失败（已重试 {attempts} 次，最后错误：{error}）。") from error
+            print(f"[audio] {dest.name} 下载中断（{error}），从 {display_size(kept)} 续传（第 {attempt}/{attempts} 次重试）。", flush=True)
+            time.sleep(min(2 ** attempt, 30))
+    if expected_size and part.exists() and part.stat().st_size != expected_size:
+        raise RuntimeError(f"{dest.name} 下载不完整（{part.stat().st_size} / {expected_size} 字节）。")
+    part.replace(dest)
+
+
 def download_huggingface_repo(repo_id: str, target_dir: Path, cache: bool = False) -> None:
     """Download into the App-owned model directory with readable progress."""
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     from huggingface_hub import hf_hub_download, repo_info
 
     info = repo_info(repo_id, files_metadata=True)
+    revision = info.sha
     siblings = [item for item in info.siblings if item.rfilename != ".gitattributes"]
     total = sum(item.size or 0 for item in siblings)
     downloaded = 0
@@ -182,9 +225,13 @@ def download_huggingface_repo(repo_id: str, target_dir: Path, cache: bool = Fals
         size = item.size or 0
         print(f"[audio] 开始下载 {item.rfilename}（{display_size(size)}）。", flush=True)
         if cache:
-            hf_hub_download(repo_id, item.rfilename, cache_dir=str(target_dir))
+            # whisper 等需要 HuggingFace 缓存目录布局的走 hf_hub_download（文件较小，卡死风险低）。
+            run_with_heartbeat(f"正在下载 {item.rfilename}", lambda target=item.rfilename: hf_hub_download(repo_id, target, cache_dir=str(target_dir), revision=revision))
         else:
-            hf_hub_download(repo_id, item.rfilename, local_dir=str(target_dir))
+            from huggingface_hub import hf_hub_url
+
+            url = hf_hub_url(repo_id, item.rfilename, revision=revision)
+            resumable_download(url, target_dir / item.rfilename, expected_size=size)
         downloaded += size
         print(f"[audio] 已下载 {display_size(downloaded)} / {display_size(total)}（{item.rfilename}）。", flush=True)
     print(f"[audio] {repo_id} 下载完成。", flush=True)

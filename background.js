@@ -291,7 +291,11 @@ function trackedJob(ctx) {
     return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status: interrupted.status, error: interrupted.error, logs: [] };
   }
   const status = shellJobStatus(job);
-  if (!isActiveJob(status) && !isTerminalJob(status)) {
+  // 仍在运行的任务只回传运行视图；只有终态才允许结算，避免轮询把 running 任务误标为 failed。
+  if (isActiveJob(status)) {
+    return { id: record.job_id, action: record.action, recordID: record.record_id, startedAt: record.started_at, status, error: shellJobError(job), logs: [] };
+  }
+  if (!isTerminalJob(status)) {
     const interrupted = { status: "interrupted", error: tr(ctx, `任务状态不可识别：${status || "empty"}`, `Task status unrecognized: ${status || "empty"}`) };
     settleOutput(ctx, record.action, record.record_id, interrupted, record.job_id);
     noteEnvOutcome(ctx, record, interrupted, []);
