@@ -197,11 +197,11 @@ function pumpQueue(ctx) {
   const inferRunning = actives.some((row) => INFER_ACTIONS.has(row.action) && row.state === "running");
   const envRunning = actives.some((row) => row.action === "prepare" && row.state === "running");
   if (!inferAny) {
-    const next = ctx.sqlite.query("select id, action, record_id, meta_json, log_path from audio_tasks where action = 'prepare' and state = 'queued' order by created_at asc limit 1");
+    const next = ctx.sqlite.query("select id, action, record_id, meta_json, payload_json, log_path from audio_tasks where action = 'prepare' and state = 'queued' order by created_at asc limit 1");
     if (next.length) void dispatchTask(ctx, next[0]);
   }
   if (!inferRunning && !envRunning) {
-    const next = ctx.sqlite.query("select id, action, record_id, meta_json, log_path from audio_tasks where action in ('transcribe','character','design','synthesize') and state = 'queued' order by created_at asc limit 1");
+    const next = ctx.sqlite.query("select id, action, record_id, meta_json, payload_json, log_path from audio_tasks where action in ('transcribe','character','design','synthesize') and state = 'queued' order by created_at asc limit 1");
     if (next.length) {
       const deps = inferModelDeps(parseTaskMeta(next[0]));
       if (!deps.some((model) => installing.has(model))) void dispatchTask(ctx, next[0]);

@@ -102,14 +102,12 @@ export function DesignVoicePanel({ busy, onClose, presets, asrReady, voxcpm2Read
   const locale = useRecutLocale();
   const [name, setName] = useState("");
   const [designDesc, setDesignDesc] = useState("");
-  const [fromPreset, setFromPreset] = useState("");
   const [saveToLibrary, setSaveToLibrary] = useState(true);
-  const ready = asrReady && (Boolean(fromPreset) || voxcpm2Ready);
+  const ready = asrReady && voxcpm2Ready;
   const missingHint = !asrReady ? t(locale, "design.missingAsr") : !voxcpm2Ready ? t(locale, "design.missingVoxcpm2") : "";
   const submit = () => {
-    if (!name.trim()) return;
-    if (!designDesc.trim() && !fromPreset) return;
-    onSubmit({ name: name.trim(), designDesc: fromPreset ? undefined : designDesc.trim() || undefined, presetId: fromPreset || undefined, saveToLibrary });
+    if (!name.trim() || !designDesc.trim()) return;
+    onSubmit({ name: name.trim(), designDesc: designDesc.trim(), saveToLibrary });
   };
   return <div className="grid gap-4">
     <div className="grid gap-2">
@@ -118,7 +116,7 @@ export function DesignVoicePanel({ busy, onClose, presets, asrReady, voxcpm2Read
     </div>
     <div className="grid gap-2">
       <Label className="text-xs text-muted-foreground" htmlFor="design-desc">{t(locale, "design.desc.label")}</Label>
-      <Textarea id="design-desc" disabled={busy !== null} maxLength={120} onChange={(event) => { setFromPreset(""); setDesignDesc(event.target.value); }} placeholder={t(locale, "design.desc.placeholder")} rows={4} value={designDesc} />
+      <Textarea id="design-desc" disabled={busy !== null} maxLength={120} onChange={(event) => setDesignDesc(event.target.value)} placeholder={t(locale, "design.desc.placeholder")} rows={4} value={designDesc} />
       <div className="flex items-center justify-between gap-2">
         <p className="text-[11px] leading-relaxed text-muted-foreground">{t(locale, "design.desc.hint")}</p>
         <span className={cn("shrink-0 font-mono text-[10px]", designDesc.length >= 120 ? "text-destructive" : "text-muted-foreground")}>{tF(locale, "design.charCount", { count: designDesc.length })}</span>
@@ -127,27 +125,20 @@ export function DesignVoicePanel({ busy, onClose, presets, asrReady, voxcpm2Read
     <div className="grid gap-2">
       <div className="flex items-center justify-between gap-2">
         <Label className="text-xs text-muted-foreground">{t(locale, "design.fromPreset")}</Label>
-        {fromPreset ? <Button className="h-6 px-2 text-[11px]" disabled={busy !== null} onClick={() => setFromPreset("")} type="button" variant="ghost">{t(locale, "design.fromPreset.clear")}</Button> : null}
       </div>
       <div className="grid max-h-52 grid-cols-2 gap-2 overflow-auto rounded-lg border border-border/60 p-2">
         {presets.map((preset) => {
-          const selected = fromPreset === preset.id;
           return (
             <button
               key={preset.id}
-              aria-pressed={selected}
-              className={cn("grid gap-1 rounded-xl border px-2.5 py-2.5 text-left text-xs transition-colors", selected ? "border-primary bg-primary/10" : "border-border/60 bg-card/50 hover:bg-muted/50")}
+              className={cn("grid gap-1 rounded-xl border px-2.5 py-2.5 text-left text-xs transition-colors", designDesc.trim() === preset.designDesc ? "border-primary bg-primary/10" : "border-border/60 bg-card/50 hover:bg-muted/50")}
               disabled={busy !== null}
-              onClick={() => {
-                const next = selected ? "" : preset.id;
-                setFromPreset(next);
-                if (next && preset.designDesc) setDesignDesc(preset.designDesc);
-              }}
+              onClick={() => setDesignDesc(preset.designDesc || "")}
               type="button"
             >
               <span className="flex items-center justify-between gap-1">
                 <strong className="truncate text-[12px] font-medium">{localizedText(locale, preset.name)}</strong>
-                {selected ? <Check className="size-3.5 shrink-0 text-primary" /> : null}
+                {designDesc.trim() && designDesc.trim() === preset.designDesc ? <Check className="size-3.5 shrink-0 text-primary" /> : null}
               </span>
               <small className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">{localizedText(locale, preset.blurb)}</small>
             </button>
@@ -155,7 +146,7 @@ export function DesignVoicePanel({ busy, onClose, presets, asrReady, voxcpm2Read
         })}
         {!presets.length ? <p className="col-span-2 py-6 text-center text-xs text-muted-foreground">{t(locale, "preset.empty")}</p> : null}
       </div>
-      {fromPreset ? <p className="text-[11px] text-primary">{tF(locale, "design.fromPreset.selected", { name: localizedText(locale, presets.find((p) => p.id === fromPreset)?.name ?? fromPreset) })}</p> : <p className="text-[11px] text-muted-foreground">{t(locale, "design.fromPreset.hint")}</p>}
+      <p className="text-[11px] text-muted-foreground">{t(locale, "design.fromPreset.hint")}</p>
     </div>
     <label className="flex w-fit cursor-pointer items-center gap-2 text-xs">
       <input checked={saveToLibrary} className="size-3.5 accent-[var(--primary,currentColor)]" disabled={busy !== null} onChange={(event) => setSaveToLibrary(event.target.checked)} type="checkbox" />
@@ -164,7 +155,7 @@ export function DesignVoicePanel({ busy, onClose, presets, asrReady, voxcpm2Read
     {ready ? null : <div className="grid gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs"><strong className="text-amber-600">{missingHint}</strong><Button disabled={busy !== null} onClick={onOpenSettings} type="button" variant="outline" size="sm" className="w-fit">{t(locale, "settings.open")}</Button></div>}
     <div className="flex items-center justify-end gap-2 border-t pt-4">
       <Button disabled={busy !== null} onClick={onClose} type="button" variant="ghost">{t(locale, "dialog.close")}</Button>
-      <Button disabled={busy !== null || !ready || !name.trim() || (!designDesc.trim() && !fromPreset)} onClick={submit} title={!ready && missingHint ? missingHint : !designDesc.trim() && !fromPreset ? t(locale, "design.descRequired") : undefined} type="button">{busy === "character" || busy === "design" ? <span className="size-4 animate-spin rounded-full border-2 border-current border-t-transparent" /> : <Wand2 className="size-4" />}{t(locale, "design.submit")}</Button>
+      <Button disabled={busy !== null || !ready || !name.trim() || !designDesc.trim()} onClick={submit} title={!ready && missingHint ? missingHint : !designDesc.trim() ? t(locale, "design.descRequired") : undefined} type="button">{busy === "character" || busy === "design" ? <span className="size-4 animate-spin rounded-full border-2 border-current border-t-transparent" /> : <Wand2 className="size-4" />}{t(locale, "design.submit")}</Button>
     </div>
   </div>;
 }

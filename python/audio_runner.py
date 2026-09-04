@@ -1071,7 +1071,7 @@ def design_character(output_relative: str, preset_id: str = "", design_desc: str
     VoxCPM2 生成探针 → 波形检查 → ASR 回读验收（≥0.85）→ 落为角色私有参考音。"""
     if bool(preset_id) == bool(design_desc.strip()):
         emit({"ready": False, "error": "design-character 需要 --preset-id 或 --design-desc 二选一。"}, 1)
-    output = safe_file(output_relative)
+    output = safe_file(output_relative).with_suffix(".wav")
     output.parent.mkdir(parents=True, exist_ok=True)
     origin = "preset" if preset_id else "design"
     try:

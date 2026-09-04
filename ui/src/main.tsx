@@ -201,11 +201,19 @@ function App() {
         const detail = await recut.background.call("audio.transcript", { id: task.recordId }) as TranscriptDetail;
         setTaskResult(detail && Array.isArray(detail.segments) ? { kind: "transcript", item: detail } : null);
       } else if (task.action === "character" || task.action === "design") {
-        const character = characters.find((item) => item.id === task.recordId);
+        // 任务完成后现拉一次角色列表：任务账本完成晚于启动时的快照，不刷新会找不到新角色。
+        const [fresh, synthesesNow] = await Promise.all([
+          recut.state.query("audio.characters") as Promise<VoiceCharacter[]>,
+          recut.state.query("audio.syntheses") as Promise<Synthesis[]>,
+        ]);
+        setCharacters(fresh);
+        setSyntheses(synthesesNow);
+        const character = (fresh || []).find((item) => item.id === task.recordId);
         setTaskResult(character ? { kind: "character", item: character } : null);
       } else if (task.action === "synthesize") {
-        const synthesis = syntheses.find((item) => item.id === task.recordId);
-        setTaskResult(synthesis ? { kind: "synthesis", item: synthesis } : null);
+        const synthesisNow = await (recut.state.query("audio.syntheses") as Promise<Synthesis[]>).then((items) => items.find((item) => item.id === task.recordId));
+        if (synthesisNow) setSyntheses((items) => items.some((item) => item.id === synthesisNow.id) ? items.map((item) => item.id === synthesisNow.id ? synthesisNow : item) : [...items, synthesisNow]);
+        setTaskResult(synthesisNow ? { kind: "synthesis", item: synthesisNow } : null);
       } else { setTaskResult(null); }
     } catch { setTaskResult(null); }
   }, [locale]);
