@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖声音工坊 App operation 与素材库 HTTP 返回的稳定 JSON，含 audio.presets 的本地化文本对象
- * [OUTPUT]: 对外提供运行状态（含 engines 双引擎就绪与运行环境错误、声音预设缓存状态、在途任务清单 tasks）、下载源、素材、Whisper/Qwen 转写（含源声音与素材库保存状态）、带来源 origin 的角色与合成输出的 UI 类型；任务摘要含排队/运行状态与 shell 任务 id（TaskSummary）；TTS 支持 CosyVoice 与 VoxCPM 引擎
+ * [OUTPUT]: 对外提供运行状态（含 engines 双引擎就绪与运行环境错误、声音预设缓存状态、在途任务清单 tasks）、下载源、素材、Whisper/Qwen 转写（含源声音与素材库保存状态）、带来源 origin 的角色与合成输出的 UI 类型；任务摘要含排队/运行状态与 shell 任务 id（TaskSummary）；TTS 支持 CosyVoice 与 VoxCPM 引擎；平台跨 Provider 声音分组（PlatformVoiceGroup/PlatformVoice）、云端声音选择（CloudVoiceSelection）与平台媒体任务（PlatformMediaJob）类型供配音分组选择使用
  * [POS]: ui/src 的领域契约；组件不重复解释后端记录字段，也不直接渲染未解析的本地化对象
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
@@ -72,3 +72,10 @@ export type TaskSummary = {
 export type TaskLogEntry = { index: number; ts: string; level: "info" | "warn" | "error" | "ok"; message: string };
 export type TaskListResult = { tasks: TaskSummary[]; nextCursor: string | null };
 export type TaskLogResult = { logs: TaskLogEntry[]; nextCursor: number | null };
+
+// ---- 平台跨 Provider 声音（配音分组选择，见 GET /v1/media/capabilities/speech.generate/voices）----
+export type PlatformVoice = { id: string; name: string; description?: string; provider: string; category?: string; previewUrl?: string; modelId?: string };
+export type PlatformVoiceModel = { id: string; name: string; provider: string; apiModelId: string };
+export type PlatformVoiceGroup = { provider: string; protocol: string; credentialId?: string; credentialName?: string; isDefaultRoute: boolean; models: PlatformVoiceModel[]; voices: PlatformVoice[]; error?: string };
+export type CloudVoiceSelection = { credentialId: string; voiceId: string; modelId: string; name: string };
+export type PlatformMediaJob = { id: string; status: string; assetIds?: string[]; error?: string };
