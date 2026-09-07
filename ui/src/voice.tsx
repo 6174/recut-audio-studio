@@ -349,7 +349,7 @@ function LocalVoiceGroup({ busy, characters, charactersLoading, engine, engineRe
   const locale = useRecutLocale();
   const localSelected = !selection.cloud;
   const defaultVoiceKey = engine === "cosyvoice2" ? "character.defaultVoice" : "voxcpm.defaultVoice";
-  return <section className="grid gap-3 rounded-xl bg-muted/30 p-3">
+  return <section className="grid gap-3 rounded-xl bg-muted/50 p-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="flex min-w-0 items-center gap-2">
         <h3 className="truncate text-sm font-semibold">{t(locale, "dubbing.group.local")}</h3>
@@ -414,7 +414,7 @@ function CloudGroup({ busy, group, modelId, selection, onSelect, onModelChange }
       ? { characterId: "", presetId: "", cloud: { credentialId: group.credentialId!, modelId: value, voiceId: first.id, name: first.name } }
       : { characterId: "", presetId: "", cloud: { credentialId: group.credentialId!, modelId: value, voiceId: "", name: "" } });
   };
-  return <section className="grid gap-3 rounded-xl bg-muted/30 p-3">
+  return <section className="grid gap-3 rounded-xl bg-muted/50 p-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="flex min-w-0 items-center gap-2">
         <h3 className="truncate text-sm font-semibold">{group.provider}{group.credentialName ? <span className="ml-1.5 text-[11px] font-normal text-foreground/60">{group.credentialName}</span> : null}</h3>
@@ -581,7 +581,7 @@ function VoiceRow({ name, description, previewURL, checked, disabled, onSelect }
     void audio.play().catch(() => {});
     setPlaying(true);
   };
-  return <div className={cn("flex items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-xs transition-colors", checked ? "border-primary bg-primary/10" : "hover:bg-muted")}>
+  return <div className={cn("flex items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-xs transition-colors", checked ? "border-primary bg-primary/10" : "bg-card hover:bg-muted/70")}>
     <button aria-pressed={checked} className="grid min-w-0 flex-1 gap-0.5 text-left disabled:pointer-events-none disabled:opacity-50" disabled={disabled} onClick={onSelect} type="button">
       <strong className="truncate font-medium">{name}</strong>
       {description && <small className="truncate text-foreground/75">{description}</small>}
