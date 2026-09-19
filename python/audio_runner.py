@@ -799,19 +799,30 @@ def qwen_segments(time_stamps: object, duration: float) -> list:
     raise RuntimeError(f"Qwen 时间戳对齐器没有返回有效结果（音频时长 {duration:.1f}s）。")
 
 
-def transcribe_whisper(model_id: str, audio: Path, language: str) -> tuple[list, str, float, float]:
+def transcribe_whisper(model_id: str, audio: Path, language: str, word_timestamps: bool = False) -> tuple[list, str, float, float]:
     whisper = load_whisper(model_id)
     language_code = None if language in ("", "auto") else language
-    segments, info = whisper.transcribe(str(audio), language=language_code, vad_filter=True)
+    segments, info = whisper.transcribe(str(audio), language=language_code, vad_filter=True, word_timestamps=word_timestamps)
     entries = []
     for segment in segments:
         entry = {"start": round(float(segment.start), 3), "end": round(float(segment.end), 3), "text": segment.text.strip(), "speaker": "", "emotion": ""}
+        if word_timestamps:
+            # 词级时间是可选增强（RFC 2026-09-17-reference-understanding §2.4）：
+            # 只有请求时才写入 segments[].words[]，未请求时字段不出现，向后兼容。
+            words = []
+            for word in getattr(segment, "words", None) or []:
+                text = str(getattr(word, "word", "")).strip()
+                if not text or getattr(word, "start", None) is None or getattr(word, "end", None) is None:
+                    continue
+                words.append({"start": round(float(word.start), 3), "end": round(float(word.end), 3), "text": text})
+            if words:
+                entry["words"] = words
         entries.append(entry)
         print(f"[audio] {format_timecode(segment.start)} → {format_timecode(segment.end)}：{entry['text']}", flush=True)
     return entries, info.language, float(info.language_probability), float(info.duration)
 
 
-def transcribe_qwen(model_id: str, audio: Path, language: str) -> tuple[list, str, float, float]:
+def transcribe_qwen(model_id: str, audio: Path, language: str, word_timestamps: bool = False) -> tuple[list, str, float, float]:
     duration = probe_duration(audio)
     qwen = run_with_heartbeat(f"正在加载 {model_id} 模型", lambda: load_qwen(model_id))
     results = run_with_heartbeat(f"{model_id} 正在识别 {duration:.1f} 秒音频", lambda: qwen.transcribe(audio=str(audio), language=QWEN_LANGUAGE_MAP[language], return_time_stamps=True))
@@ -827,14 +838,14 @@ def transcribe_qwen(model_id: str, audio: Path, language: str) -> tuple[list, st
             if not downloaded_whisper(fallback):
                 continue
             print(f"[audio] {model_id} 时间戳对齐失败（{duration:.1f}s），回退 {fallback} 生成带时间戳转写。", flush=True)
-            return transcribe_whisper(fallback, audio, language)
+            return transcribe_whisper(fallback, audio, language, word_timestamps)
         raise
     for entry in entries:
         print(f"[audio] {format_timecode(entry['start'])} → {format_timecode(entry['end'])}：{entry['text']}", flush=True)
     return entries, str(getattr(result, "language", "")), 1.0, duration
 
 
-def transcribe(model_id: str, language: str, source_relative: str, stem_relative: str) -> None:
+def transcribe(model_id: str, language: str, source_relative: str, stem_relative: str, word_timestamps: bool = False) -> None:
     current = state(model_root())
     if model_id not in ASR_MODELS or model_id not in current["asr"]["installed"]:
         emit({"ready": False, "error": current["error"] or f"Model {model_id} has not been installed."}, 1)
@@ -847,12 +858,13 @@ def transcribe(model_id: str, language: str, source_relative: str, stem_relative
         extract_audio(source, audio)
         print(f"[audio] 正在加载 {model_id} 模型。", flush=True)
         print("[audio] 开始转写。", flush=True)
-        entries, detected_language, probability, duration = transcribe_whisper(model_id, audio, language) if model_id in WHISPER_MODELS else transcribe_qwen(model_id, audio, language)
+        entries, detected_language, probability, duration = transcribe_whisper(model_id, audio, language, word_timestamps) if model_id in WHISPER_MODELS else transcribe_qwen(model_id, audio, language, word_timestamps)
         transcript = {
             "model": model_id,
             "language": detected_language,
             "languageProbability": round(probability, 4),
             "duration": round(duration, 3),
+            "wordLevel": any(entry.get("words") for entry in entries),
             "segments": entries,
         }
         json_path = stem.with_suffix(".json")
@@ -1231,6 +1243,7 @@ def main() -> None:
     transcribe_parser.add_argument("--language", choices=["auto", "zh", "en"], required=True)
     transcribe_parser.add_argument("--input", required=True)
     transcribe_parser.add_argument("--output", required=True)
+    transcribe_parser.add_argument("--word-timestamps", action="store_true", help="可选：输出 segments[].words[] 词级时间（RFC 2026-09-17-reference-understanding §2.4）")
     character_parser = commands.add_parser("character")
     character_parser.add_argument("--model", choices=ASR_MODELS, required=True)
     character_parser.add_argument("--input", required=True)
@@ -1282,7 +1295,7 @@ def main() -> None:
         elif args.command == "install":
             install(args.model, args.source)
         elif args.command == "transcribe":
-            transcribe(args.model, args.language, args.input, args.output)
+            transcribe(args.model, args.language, args.input, args.output, getattr(args, "word_timestamps", False))
         elif args.command == "character":
             prepare_character(args.model, args.input, args.output)
         elif args.command == "synthesize":

@@ -137,7 +137,10 @@ function buildJobSpec(ctx, action, row, payload) {
   const p = payload || {};
   const logPath = row.log_path || taskLogPath(row.id);
   if (action === "transcribe") {
-    return { args: ["python/audio_runner.py", "transcribe", "--model", p.model, "--language", p.language, "--input", p.sourcePath, "--output", `transcripts/${row.record_id}`, "--task-log", logPath] };
+    const spec = { args: ["python/audio_runner.py", "transcribe", "--model", p.model, "--language", p.language, "--input", p.sourcePath, "--output", `transcripts/${row.record_id}`, "--task-log", logPath] };
+    // 词级时间是可选增强（RFC 2026-09-17-reference-understanding §2.4）：仅在请求时传递。
+    if (p.wordTimestamps) spec.args.push("--word-timestamps");
+    return spec;
   }
   if (action === "character") {
     return { args: ["python/audio_runner.py", "character", "--model", p.model, "--input", p.sourcePath, "--output", `characters/${row.record_id}/sample`, "--task-log", logPath] };
@@ -604,6 +607,7 @@ function transcribe(input, ctx) {
   const model = value(input, "model");
   const language = value(input, "language");
   const saveToLibrary = input.saveToLibrary === true || String(input.saveToLibrary || "").trim().toLowerCase() === "true";
+  const wordTimestamps = input.wordTimestamps === true || String(input.wordTimestamps || "").trim().toLowerCase() === "true";
   if (!assetID || !KINDS.has(kind) || !ASR_MODELS.has(model) || !LANGUAGES.has(language)) throw new Error("assetId, kind, model and language are required");
   pumpQueue(ctx); // 先结算释放槽位；推理单槽被占时提交照收（入队等待，RFC task-queue）
   // saveToLibrary 幂等去重：同源+同模型+同语言且已入库的已完成转写直接复用，不重复起 job、不产生重复全局资产。
@@ -619,7 +623,7 @@ function transcribe(input, ctx) {
   ctx.sqlite.execute("insert into audio_transcripts (id, source_asset_id, source_kind, model, language, save_to_library, srt_path, json_path, audio_path, saved_asset_id, duration, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.sourceAssetId, record.sourceKind, record.model, record.language, record.saveToLibrary ? 1 : 0, record.srtPath, record.jsonPath, record.audioPath, record.savedAssetId, record.duration, record.createdAt, record.jobId, record.status, record.error]);
   const tid = outputID();
   // 排队重放载荷：materialize 后的沙箱路径随 payload 保存（等待期只依赖 App 沙箱副本，不重读素材库）。
-  submitJob(ctx, { action: "transcribe", recordID: id, payload: { model, language, sourcePath: source.path }, meta: { type: "转写", model, language, sourceAssetId: assetID, sourceKind: kind }, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid });
+  submitJob(ctx, { action: "transcribe", recordID: id, payload: { model, language, sourcePath: source.path, wordTimestamps }, meta: { type: "转写", model, language, sourceAssetId: assetID, sourceKind: kind }, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid });
   pumpQueue(ctx); // 空槽立即派发；占槽则保持 queued，由后续轮询按 FIFO 自动启动
   const row = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, started_at, error from audio_tasks where id = ?", [tid])[0];
   return { job: jobForTask(ctx, row), taskId: tid, transcript: { id } };

@@ -73,8 +73,8 @@
       "name": "audio.transcribe",
       "surfaces": ["api", "mcp"],
       "capability": true,
-      "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，默认不会保存到素材库。推理任务单槽 FIFO 排队：空槽立即派发（job 非空），占槽时 job=null（已排队，槽位释放后自动开始，用 audio.status.tasks / audio.tasks.list 观察）；同模型权重仍在下载时也保持排队。完成后用 audio.transcript(id) 读取分段与 SRT。saveToLibrary:true 时终态自动导入全局素材库为 transcript 素材（幂等去重），一次调用即完成转写+入库。",
-      "inputSchema": { "type": "object", "required": ["assetId", "kind", "model", "language"], "properties": { "assetId": { "type": "string" }, "kind": { "type": "string", "enum": ["audio", "video"] }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] }, "language": { "type": "string", "enum": ["auto", "zh", "en"] }, "saveToLibrary": { "type": "boolean", "description": "可选；默认 false=私有产物不自动入库；true=终态后自动导入为平台 transcript 素材并返回 transcriptAssetId。" } } }
+      "description": "把一个音频或视频素材复制到私有工作目录，转写为 transcript.json 文稿和 SRT 字幕，默认不会保存到素材库。推理任务单槽 FIFO 排队：空槽立即派发（job 非空），占槽时 job=null（已排队，槽位释放后自动开始，用 audio.status.tasks / audio.tasks.list 观察）；同模型权重仍在下载时也保持排队。完成后用 audio.transcript(id) 读取分段与 SRT。saveToLibrary:true 时终态自动导入全局素材库为 transcript 素材（幂等去重），一次调用即完成转写+入库。wordTimestamps:true 时在 segments[].words[] 写入词级时间（可选增强，默认关闭）。",
+      "inputSchema": { "type": "object", "required": ["assetId", "kind", "model", "language"], "properties": { "assetId": { "type": "string" }, "kind": { "type": "string", "enum": ["audio", "video"] }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] }, "language": { "type": "string", "enum": ["auto", "zh", "en"] }, "saveToLibrary": { "type": "boolean", "description": "可选；默认 false=私有产物不自动入库；true=终态后自动导入为平台 transcript 素材并返回 transcriptAssetId。" }, "wordTimestamps": { "type": "boolean", "description": "可选；默认 false=段落级时间；true=在 segments[].words[] 输出词级时间（RFC 2026-09-17-reference-understanding §2.4）。" } } }
     },
     {
       "name": "audio.transcripts",
