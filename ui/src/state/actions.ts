@@ -322,7 +322,7 @@ export async function createCharacter() {
   if (!characterName.trim()) return setMessage(t(locale, "msg.nameCharacter"));
   setBusy("character"); setFailure(""); setLogs([]);
   setMessage(t(locale, "msg.creatingCharacter"));
-  try { const result = await recut.background.call("audio.character.create", { assetId: characterAssetId, name: characterName.trim(), model }) as { job: ShellJob | null; taskId: string; character: { id: string } }; beginJob(result.job, "character", result.character.id); focusNewTask(result.taskId, "character", result.character.id, { type: "声音角色", model, characterName: characterName.trim(), sourceAssetId: characterAssetId }, result.job ? "running" : "queued"); if (!result.job) setMessage(t(locale, "msg.jobQueued")); }
+  try { const result = await recut.background.call("audio.character.create", { assetId: characterAssetId, name: characterName.trim(), model, saveToLibrary: false }) as { job: ShellJob | null; taskId: string; character: { id: string } }; beginJob(result.job, "character", result.character.id); focusNewTask(result.taskId, "character", result.character.id, { type: "声音角色", model, characterName: characterName.trim(), sourceAssetId: characterAssetId }, result.job ? "running" : "queued"); if (!result.job) setMessage(t(locale, "msg.jobQueued")); }
   catch (error) { setMessage(error instanceof Error ? error.message : t(locale, "msg.characterFailed")); setBusy(null); }
 }
 

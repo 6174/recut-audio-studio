@@ -94,7 +94,7 @@
       "name": "audio.character.create",
       "surfaces": ["api", "mcp"],
       "description": "从一段参考音频素材创建声音角色：自动截取连续人声、验证波形与声纹，并以合成后 ASR 回读校准角色质量，返回异步任务。",
-      "inputSchema": { "type": "object", "required": ["assetId", "name", "model"], "properties": { "assetId": { "type": "string" }, "name": { "type": "string" }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] } } }
+      "inputSchema": { "type": "object", "required": ["assetId", "name", "model"], "properties": { "assetId": { "type": "string" }, "name": { "type": "string" }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"] }, "saveToLibrary": { "type": "boolean", "description": "可选；缺省 true（AI 创建默认把参考音导入素材库并返回 assetId）；传 false 仅保留私有角色，稍后可用 audio.save 入库。" } } }
     },
     {
       "name": "audio.presets",
@@ -112,7 +112,7 @@
       "name": "audio.character.design",
       "surfaces": ["api", "mcp"],
       "description": "用 VoxCPM2 Voice Design 音色描述或一个声音预设创建声音角色：presetId 分支零推理（解析预设参考音缓存/下载后直接落为角色）；designDesc 分支由 VoxCPM2 生成探针并经 Qwen3-ASR 回读验收（≥0.85）后建角色。产物是 origin=design/preset 的普通角色，用 audio.character.complete 读取、audio.save(id, kind:character) 入库。推理任务单槽排队：占槽时 job=null（已排队，槽位释放后自动开始）。",
-      "inputSchema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "description": "角色名，必填。" }, "designDesc": { "type": "string", "maxLength": 120, "description": "中文音色描述（年龄/性别 + 音色质地 + 语速节奏 + 参照场景，不写真实人名）；与 presetId 二选一。" }, "presetId": { "type": "string", "description": "声音预设 id（见 audio.presets）；与 designDesc 二选一。" }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"], "description": "可选；回读验收 ASR 模型，缺省 qwen3-asr-0.6b。" }, "saveToLibrary": { "type": "boolean", "description": "可选；true 时终态后自动把参考音导入素材库并返回 assetId（World voice_reference 链路依赖）。" } } }
+      "inputSchema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "description": "角色名，必填。" }, "designDesc": { "type": "string", "maxLength": 120, "description": "中文音色描述（年龄/性别 + 音色质地 + 语速节奏 + 参照场景，不写真实人名）；与 presetId 二选一。" }, "presetId": { "type": "string", "description": "声音预设 id（见 audio.presets）；与 designDesc 二选一。" }, "model": { "type": "string", "enum": ["qwen3-asr-0.6b", "qwen3-asr-1.7b", "whisper-small", "whisper-medium", "whisper-large-v3"], "description": "可选；回读验收 ASR 模型，缺省 qwen3-asr-0.6b。" }, "saveToLibrary": { "type": "boolean", "description": "可选；缺省 true（AI 创建默认把参考音导入素材库并返回 assetId，World voice_reference 链路依赖）；传 false 仅保留私有角色，稍后可用 audio.save 入库。" } } }
     },
     {
       "name": "audio.character.complete",

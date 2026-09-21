@@ -103,7 +103,7 @@ export function DesignVoicePanel({ busy, onClose, presets, asrReady, voxcpm2Read
   const locale = useRecutLocale();
   const [name, setName] = useState("");
   const [designDesc, setDesignDesc] = useState("");
-  const [saveToLibrary, setSaveToLibrary] = useState(true);
+  const [saveToLibrary, setSaveToLibrary] = useState(false);
   const ready = asrReady && voxcpm2Ready;
   const missingHint = !asrReady ? t(locale, "design.missingAsr") : !voxcpm2Ready ? t(locale, "design.missingVoxcpm2") : "";
   const submit = () => {

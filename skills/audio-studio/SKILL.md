@@ -23,7 +23,7 @@ description: 对本地音视频执行转写生成字幕文稿、用参考音创�
 AI 创建 World 角色（`recut.worlds.entities.upsert` character）需要 voice_reference 证据时，按以下链路操作：
 
 1. `audio.presets` 枚举默认声音预设，按角色人设挑选 scene/presetId；没有合适预设时，按人设自写中文 designDesc。写法模板：**年龄/性别 + 音色质地 + 语速节奏 + 参照场景**，只描述声线特征，不写真实人名（例：「一位低沉的中文男声，语速缓慢克制，像深夜电台讲述者」）。
-2. `audio.character.design { name: 角色名, presetId|designDesc, saveToLibrary: true }`（二选一传入，异步 job）→ `recut.job.wait` 等待终态 → 拿到角色参考音入库后的 `assetId`。
+2. `audio.character.design { name: 角色名, presetId|designDesc }`（二选一传入，异步 job）→ `recut.job.wait` 等待终态 → 拿到角色参考音入库后的 `assetId`。AI 创建**默认入库**（不传 `saveToLibrary` 即为 true）；仅在明确不需要复用参考音时传 `saveToLibrary: false`（人工 UI 路径默认不入库）。
 3. `recut.worlds.entities.upsert`（character）时内联证据，或 `recut.worlds.evidence.attach` 一条 `{ role: "voice_reference", assetId: <上一步的 assetId> }`。
 4. 纪律：**不克隆真人声音**；designDesc 只描述声线特征，不得指向真实自然人（含网红、配音演员）。预设固化产物是共享缓存，design 产出的用户角色才是可删除的私有资产。
 

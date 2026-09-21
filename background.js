@@ -2,7 +2,7 @@
  * [INPUT]: 依赖 ctx.sqlite 保存模型下载源、转写/角色/合成记录与统一任务账本 audio_tasks（含 queued 排队语义与 payload 重放载荷），ctx.media 复制/显式导入素材，ctx.files 生成私有预览 URL，ctx.python 与 ctx.shell 执行可观察本地任务（prepare 全量走 ctx.python.prepare，定向 cosyvoice/voxcpm 走 ctx.python.run 执行 bootstrap.py --target），CDN 声音预设 manifest（经 audio_runner presets 子命令拉取，内置 bootstrap 兜底）
  * [OUTPUT]: 注册环境检查（audio.status，含在途任务清单 tasks）、定向/全量环境准备（audio.prepare target: all|cosyvoice|voxcpm）、下载源设置（audio.settings.set）、Whisper/Qwen 模型安装、转写、通过参考音与声纹验收的声音角色创建、声音预设枚举（audio.presets）、预设参考音按需准备（audio.preset.prepare：缓存查 → CDN 下载 + sha256 校验 → 私有 preview URL，供 UI 免手动下载试听）、VoxCPM2 Voice Design / 预设实例化建角色（audio.character.design，origin=design/preset，saveToLibrary 懒入库并回填 assetId）、配音合成（CosyVoice 或 VoxCPM 引擎/版本可选，支持 presetId 参考音，与 characterId 互斥）、历史与用户确认入库 operation；转写可保存为源声音 + SRT + JSON 的 platform transcript 素材。
  * 任务并发模型（rfc/2026-09-03-task-queue-and-parallelism.md）：推理类（transcribe/character/design/synthesize）单槽 FIFO 排队串行，环境准备（prepare）单槽排队（等推理排空），模型下载（install）不限并行；提交永不拒绝，空槽立即派发、占槽时入队（返回 job=null + taskId）；pumpQueue（settleAllJobs 结算 + 守卫派发）由 status/tasks.list/提交/取消轮询驱动。旧单在途账本 audio_jobs 退役（启动清扫遗留行）。audio.transcribe 扩了 saveToLibrary 开关（默认 false=私有产物不自动入库；true=终态懒入库为全局 transcript 素材并幂等去重，一次能力调用完成转写+入库）。转写/列表/详情/状态 op 已标记 capability，可被其他 App 经 ctx.capabilities.invoke 复用。
- * [POS]: audio-studio 的唯一业务后端；声音角色须通过质量验收（design/preset 产物按回读验收入账，走同一任务中心），未选角色/预设时使用 CosyVoice 官方默认声音进入 TTS，输出先停留在 App 文件沙箱，绝不生成时自动创建素材库 Asset（除 saveToLibrary:true 的显式授权）。
+ * [POS]: audio-studio 的唯一业务后端；声音角色须通过质量验收（design/preset 产物按回读验收入账，走同一任务中心），未选角色/预设时使用 CosyVoice 官方默认声音进入 TTS。角色入库策略 resolveCharacterSaveToLibrary：显式 saveToLibrary 优先，缺省视为 AI 创建 → 默认入库；人工 UI 路径显式传 false（默认不入库）。
  * [PROTOCOL]: 变更时更新此头部，然后检查 README.md
  */
 
@@ -56,6 +56,17 @@ const RECORD_TABLES = {
 
 function value(input, name) { return String(input[name] || "").trim(); }
 function outputID() { return `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+
+// 声音角色入库策略：显式 saveToLibrary 优先；缺省视为 AI 创建 → 默认入库（AI 可直接复用参考音）。
+// 人工 UI 路径会显式传 false（默认不入库），用户仍可在面板勾选或事后 audio.save。
+function resolveCharacterSaveToLibrary(input) {
+  const raw = input.saveToLibrary;
+  if (raw === true || raw === false) return raw;
+  const text = String(raw ?? "").trim().toLowerCase();
+  if (text === "true") return true;
+  if (text === "false") return false;
+  return true;
+}
 
 // 任务中心：每任务日志文件路径（与 transcripts/${id}.srt 同处 App 私有文件区）。
 function taskLogPath(taskID) { return `tasks/${taskID}.log`; }
@@ -465,6 +476,10 @@ function settleOutput(ctx, action, recordID, job, jobID = "") {
     } catch (_) { /* 日志不可读时保留 detail */ }
   }
   ctx.sqlite.execute(`update ${table} set status = ?, error = ? where id = ?`, [outputStatus(job.status), errorText, recordID]);
+  // 角色/设计任务终态即按 saveToLibrary 自动入库：AI 创建后可直接在素材库拿到参考音，无需人工手动保存。
+  if ((action === "character" || action === "design") && job.status === "completed") {
+    try { finalizeSaveCharacterToLibrary(ctx, { id: recordID }); } catch (_) { /* 入库失败不阻断结算，后续读取或 audio.save 可重试 */ }
+  }
 }
 
 // 「当前在途任务」（audio.status / audio.job）：audio_tasks 最新一条非终态行，合成旧 ActiveAudioJob 形状。
@@ -720,12 +735,13 @@ function characterCreate(input, ctx) {
   pumpQueue(ctx);
   const source = ctx.media.materialize(assetID);
   if (source.kind !== "audio") throw new Error(`Selected Asset is ${source.kind}, not audio.`);
+  const saveToLibrary = resolveCharacterSaveToLibrary(input);
   const id = outputID();
   const stem = `characters/${id}/sample`;
-  const record = { id, name, model, samplePath: `${stem}.wav`, sampleAssetId: "", promptText: "", createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
-  ctx.sqlite.execute("insert into audio_characters (id, name, model, sample_path, sample_asset_id, prompt_text, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.name, record.model, record.samplePath, record.sampleAssetId, record.promptText, record.createdAt, record.jobId, record.status, record.error]);
+  const record = { id, name, model, samplePath: `${stem}.wav`, sampleAssetId: "", promptText: "", origin: "clone", saveToLibrary, createdAt: new Date().toISOString(), jobId: "", status: "queued", error: "" };
+  ctx.sqlite.execute("insert into audio_characters (id, name, model, sample_path, sample_asset_id, prompt_text, origin, save_to_library, created_at, job_id, status, error) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [record.id, record.name, record.model, record.samplePath, record.sampleAssetId, record.promptText, record.origin, record.saveToLibrary ? 1 : 0, record.createdAt, record.jobId, record.status, record.error]);
   const tid = outputID();
-  submitJob(ctx, { action: "character", recordID: id, payload: { model, name, sourcePath: source.path }, meta: { type: "声音角色", model, characterName: name, sourceAssetId: assetID }, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid });
+  submitJob(ctx, { action: "character", recordID: id, payload: { model, name, sourcePath: source.path }, meta: { type: "声音角色", model, characterName: name, sourceAssetId: assetID, saveToLibrary }, source: value(input, "origin"), submittedBy: value(input, "submittedBy"), taskId: tid });
   pumpQueue(ctx);
   const row = ctx.sqlite.query("select id, shell_job_id, action, record_id, state, started_at, error from audio_tasks where id = ?", [tid])[0];
   return { job: jobForTask(ctx, row), taskId: tid, character: { id } };
@@ -765,7 +781,7 @@ function characterDesign(input, ctx) {
   const designDesc = value(input, "designDesc");
   const presetId = value(input, "presetId");
   const model = value(input, "model") || "qwen3-asr-0.6b";
-  const saveToLibrary = input.saveToLibrary === true || String(input.saveToLibrary || "").trim().toLowerCase() === "true";
+  const saveToLibrary = resolveCharacterSaveToLibrary(input);
   if (!name) throw new Error(tr(ctx, "name 必填。", "name is required."));
   if (!designDesc && !presetId) throw new Error(tr(ctx, "designDesc 与 presetId 至少提供一个（二选一）。", "Provide either designDesc or presetId."));
   if (designDesc && presetId) throw new Error(tr(ctx, "designDesc 与 presetId 互斥，请二选一。", "designDesc and presetId are mutually exclusive."));
@@ -785,17 +801,34 @@ function characterDesign(input, ctx) {
   return { job: jobForTask(ctx, row), taskId: tid, character: { id, origin } };
 }
 
-// design/preset 角色的 saveToLibrary 懒终态：完成且要求入库但还没入库时，幂等补一次
-// audio.save 的 character 导入路径，并把 assetId 回填进任务 meta（World 链路依赖）。
+// 用产物 meta 回填 design/preset 角色的 prompt_text：合成时作为参考音文本，CosyVoice2 依赖它。
+function hydrateCharacterPrompt(ctx, row) {
+  if (row.prompt_text) return row;
+  const meta = readJSON(ctx, `${row.sample_path}.meta.json`);
+  if (!meta || !meta.promptText) return row;
+  ctx.sqlite.execute("update audio_characters set prompt_text = ? where id = ?", [meta.promptText, row.id]);
+  row.prompt_text = meta.promptText;
+  return row;
+}
+
+// design/preset 角色的 saveToLibrary 终态入库：完成且要求入库但还没入库时，幂等导入素材库，
+// 回填 sample_asset_id 与 prompt_text，并把 assetId 写进任务 meta（World 链路依赖）。
+// 以库内权威行为准，避免调用方 select 列不全（如缺 status/origin）时误判为未完成。
 function finalizeSaveCharacterToLibrary(ctx, row) {
-  const flag = row.save_to_library === 1 || String(row.save_to_library || "").trim() === "1" || String(row.save_to_library || "").trim().toLowerCase() === "true";
-  if (!flag) return row.sample_asset_id || "";
-  if (row.sample_asset_id) return row.sample_asset_id;
-  if (row.status !== "completed" || !row.sample_path) return "";
-  const asset = ctx.media.importFile({ path: row.sample_path, name: `voice-character-${row.id}.wav`, mimeType: "audio/wav" });
-  ctx.sqlite.execute("update audio_characters set sample_asset_id = ? where id = ?", [asset.id, row.id]);
+  const rows = ctx.sqlite.query("select id, sample_path, sample_asset_id, prompt_text, origin, save_to_library, status from audio_characters where id = ?", [row.id]);
+  if (!rows.length) return row.sample_asset_id || "";
+  const current = rows[0];
+  hydrateCharacterPrompt(ctx, current);
+  row.prompt_text = current.prompt_text;
+  const flag = current.save_to_library === 1 || String(current.save_to_library || "").trim() === "1" || String(current.save_to_library || "").trim().toLowerCase() === "true";
+  if (!flag) return current.sample_asset_id || "";
+  if (current.sample_asset_id) { row.sample_asset_id = current.sample_asset_id; return current.sample_asset_id; }
+  if (current.status !== "completed" || !current.sample_path) return "";
+  const asset = ctx.media.importFile({ path: current.sample_path, name: `voice-character-${current.id}.wav`, mimeType: "audio/wav" });
+  ctx.sqlite.execute("update audio_characters set sample_asset_id = ? where id = ?", [asset.id, current.id]);
+  current.sample_asset_id = asset.id;
   row.sample_asset_id = asset.id;
-  const tasks = ctx.sqlite.query("select id, meta_json from audio_tasks where record_id = ? order by created_at desc limit 1", [row.id]);
+  const tasks = ctx.sqlite.query("select id, meta_json from audio_tasks where record_id = ? order by created_at desc limit 1", [current.id]);
   if (tasks.length) {
     let meta = {};
     try { meta = JSON.parse(tasks[0].meta_json || "{}"); } catch (_) { /* keep empty */ }
@@ -855,7 +888,7 @@ function characterComplete(input, ctx) {
 function characters(_, ctx) {
   ensureSchema(ctx);
   trackedJob(ctx);
-  return ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, origin, save_to_library, created_at from audio_characters where status = 'completed' order by created_at desc").filter((row) => characterQuality(ctx, row)).map((row) => {
+  return ctx.sqlite.query("select id, name, model, sample_path, sample_asset_id, prompt_text, origin, save_to_library, status, created_at from audio_characters where status = 'completed' order by created_at desc").map((row) => hydrateCharacterPrompt(ctx, row)).filter((row) => characterQuality(ctx, row)).map((row) => {
     try { finalizeSaveCharacterToLibrary(ctx, row); } catch (_) { /* 入库失败不阻断列表，保留私有产物 */ }
     return characterRecord(ctx, row);
   }).filter(Boolean);
@@ -885,7 +918,7 @@ function synthesize(input, ctx) {
   const isVoxCpm = VOXCPM_MODELS.includes(engine);
   if (isVoxCpm && !characterID && !presetId && engine !== "voxcpm2") throw new Error("VoxCPM1.5 / VoxCPM-0.5B use continuation cloning and need a voice character.");
   pumpQueue(ctx);
-  const characters = characterID ? ctx.sqlite.query("select id, name, sample_path, prompt_text from audio_characters where id = ? and status = 'completed'", [characterID]).filter((row) => characterQuality(ctx, row)) : [];
+  const characters = characterID ? ctx.sqlite.query("select id, name, model, sample_path, prompt_text, origin, status from audio_characters where id = ? and status = 'completed'", [characterID]).map((row) => hydrateCharacterPrompt(ctx, row)).filter((row) => characterQuality(ctx, row)) : [];
   if (characterID && !characters.length) throw new Error("Selected voice character was not found.");
   const id = outputID();
   const outputPath = `syntheses/${id}.wav`;
