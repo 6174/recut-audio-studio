@@ -25,21 +25,37 @@
       "bootstrap": "bootstrap.py"
     }
   },
-  "distribution": {
-    "builtin": {
-      "include": ["."],
-      "exclude": [
-        "rfc",
-        "publish",
-        "__pycache__",
-        "**/__pycache__",
-        "ui/node_modules",
-        "ui/src",
-        "ui/package-lock.json",
-        "ui/package.json",
-        "ui/tsconfig.json",
-        "ui/vite.config.ts",
-        "ui/components.json"
+  "contributes": {
+    "media": {
+      "providers": [
+        {
+          "id": "local-audio",
+          "name": "声音工坊（本机）",
+          "localized": { "en": { "name": "Audio Studio (local)" } },
+          "protocol": "local",
+          "operations": {
+            "generate": "audio.synthesize",
+            "save": "audio.save",
+            "catalog": "audio.status",
+            "status": "audio.status"
+          },
+          "voices": { "presets": "audio.presets", "characters": "audio.characters" },
+          "executor": {
+            "resultIdPath": "synthesis.id",
+            "saveKind": "synthesis",
+            "inputMap": { "text": "job.prompt", "voiceId": "job.voiceId" }
+          },
+          "models": [
+            {
+              "id": "cosyvoice2",
+              "name": "CosyVoice2 · 本机 TTS",
+              "capability": "speech.generate",
+              "runtime": "cosyvoice",
+              "inputModes": ["text"],
+              "outputModes": ["voice"]
+            }
+          ]
+        }
       ]
     }
   },

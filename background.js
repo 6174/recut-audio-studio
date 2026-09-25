@@ -906,8 +906,16 @@ function characterRemove(input, ctx) {
 
 function synthesize(input, ctx) {
   ensureSchema(ctx);
-  const characterID = value(input, "characterId");
-  const presetId = value(input, "presetId");
+  let characterID = value(input, "characterId");
+  let presetId = value(input, "presetId");
+  // 平台通用执行桥传入原始 voiceId（preset:/character:/__cosyvoice_default__ 编码）；在此解码，
+  // 避免把本机声音来源约定写进 service 层。
+  const voiceId = value(input, "voiceId");
+  if (voiceId && !characterID && !presetId) {
+    if (voiceId.startsWith("preset:")) presetId = voiceId.slice("preset:".length);
+    else if (voiceId.startsWith("character:")) characterID = voiceId.slice("character:".length);
+    else if (voiceId !== "__cosyvoice_default__") characterID = voiceId;
+  }
   const text = value(input, "text");
   const style = value(input, "style") || "neutral";
   const engine = value(input, "engine") || "cosyvoice2";
