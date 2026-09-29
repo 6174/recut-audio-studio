@@ -37,7 +37,8 @@
             "generate": "audio.synthesize",
             "save": "audio.save",
             "catalog": "audio.status",
-            "status": "audio.status"
+            "status": "audio.status",
+            "task": "audio.task.get"
           },
           "voices": { "presets": "audio.presets", "characters": "audio.characters" },
           "executor": {
